@@ -1,0 +1,88 @@
+rules_version = '2';
+
+// ============================================================================
+// Assumed Data Model (O2CITY Air-Quality Platform)
+// ============================================================================
+//
+// Note: All writes to these collections are performed exclusively by trusted
+// backend ingestion endpoints (api/ingest-aqi.ts, api/aqi/latest.ts) using
+// the Firebase Admin SDK, which bypasses client security rules.
+//
+// Collection: stations
+// Document ID: {stationId} (slugified "{state}_{city}_{station}", 2-100 chars)
+// Fields:
+//   - stationId: string (required, immutable)
+//   - stationName: string (required)
+//   - city: string (required)
+//   - state: string (required)
+//   - latitude: number (required)
+//   - longitude: number (required)
+//   - active: bool (required)
+//   - source: string (required)
+//
+// Collection: aqi_latest
+// Document ID: {stationId}
+// Fields:
+//   - stationId: string (required, immutable)
+//   - aqi: number | null (required)
+//   - aqiCategory: string (required: Good | Satisfactory | Moderate | Poor | Very Poor | Severe | Unavailable)
+//   - pollutants: map (required: pm25, pm10, no2, so2, co, o3, nh3 as number | null)
+//   - sourceTimestamp: string | null (required, ISO 8601)
+//   - fetchedAt: string (required, ISO 8601)
+//   - dataStatus: string (required: live | delayed | unavailable)
+//
+// Collection: aqi_history
+// Document ID: {stationId}_{timestamp_key}
+// Fields:
+//   - Same schema as aqi_latest, appended per unique station reading timestamp
+//
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ========================================================================
+    // Helper Functions
+    // ========================================================================
+
+    // Enforce bounded list queries to prevent unbounded collection scans
+    // by unauthenticated clients.
+    function isBoundedListQuery(maxLimit) {
+      return request.query.limit is int &&
+             request.query.limit > 0 &&
+             request.query.limit <= maxLimit;
+    }
+
+    // ========================================================================
+    // Public Air-Quality Collections (Read-Only for Clients)
+    // ========================================================================
+
+    // Monitoring station metadata (non-PII, public reference data)
+    match /stations/{stationId} {
+      allow get, list: if true;
+      allow create, update, delete: if false;
+    }
+
+    // Latest AQI reading per station (non-PII, public telemetry)
+    match /aqi_latest/{stationId} {
+      allow get, list: if true;
+      allow create, update, delete: if false;
+    }
+
+    // Historical AQI time-series readings (non-PII, public telemetry)
+    // List queries are capped at 72 documents to prevent full-collection scans.
+    match /aqi_history/{historyId} {
+      allow get: if true;
+      allow list: if isBoundedListQuery(72);
+      allow create, update, delete: if false;
+    }
+
+    // ========================================================================
+    // Default Deny
+    // ========================================================================
+    // Explicitly deny all reads and writes to any other collection or subcollection.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
