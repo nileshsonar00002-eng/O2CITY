@@ -16,9 +16,12 @@ export interface CPCBRecordRaw {
   latitude?: string | number;
   longitude?: string | number;
   pollutant_id?: string;
+  pollutant?: string;
   pollutant_min?: string | number;
   pollutant_max?: string | number;
   pollutant_avg?: string | number;
+  avg_value?: string | number;
+  value?: string | number;
 }
 
 export interface NormalizedStation {
@@ -394,6 +397,28 @@ export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
     throw new CPCBError('CPCB_EMPTY_DATASET', 'CPCB upstream returned an empty dataset', 502);
   }
 
+  const firstRow = allRecords[0];
+  if (firstRow && typeof firstRow === 'object') {
+    const samplePollutantIds = Array.from(
+      new Set(
+        allRecords
+          .slice(0, 30)
+          .map((r) => String(r.pollutant_id ?? r.pollutant ?? '').trim())
+          .filter(Boolean)
+      )
+    ).slice(0, 10);
+
+    console.info(
+      JSON.stringify({
+        event: 'cpcb_schema_check',
+        totalRawRecords: allRecords.length,
+        recordKeys: Object.keys(firstRow),
+        samplePollutantIds,
+        sampleAvgRawType: typeof (firstRow.pollutant_avg ?? firstRow.avg_value ?? firstRow.value),
+      })
+    );
+  }
+
   const stationMap = new Map<
     string,
     {
@@ -451,10 +476,14 @@ export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
       stationMap.set(stationId, entry);
     }
 
-    const avgVal = parsePollutantValue(row.pollutant_avg);
-    const pid = (row.pollutant_id ?? '').trim().toUpperCase();
+    const rawAvg = row.pollutant_avg ?? row.avg_value ?? row.value;
+    const avgVal = parsePollutantValue(rawAvg);
+    const pid = (row.pollutant_id ?? row.pollutant ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s_]+/g, '');
 
-    if (pid === 'PM2.5') entry.pollutants.pm25 = avgVal;
+    if (pid === 'PM2.5' || pid === 'PM25') entry.pollutants.pm25 = avgVal;
     else if (pid === 'PM10') entry.pollutants.pm10 = avgVal;
     else if (pid === 'NO2') entry.pollutants.no2 = avgVal;
     else if (pid === 'SO2') entry.pollutants.so2 = avgVal;
