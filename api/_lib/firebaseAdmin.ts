@@ -1,7 +1,8 @@
 import { cert, getApps, initializeApp, type App } from 'firebase-admin/app';
-import { getFirestore, type Firestore } from 'firebase-admin/firestore';
+import { getFirestore, initializeFirestore, type Firestore } from 'firebase-admin/firestore';
 
 let cachedApp: App | null = null;
+let cachedDb: Firestore | null = null;
 
 function normalizePrivateKey(raw: string): string {
   let key = raw.trim();
@@ -36,6 +37,10 @@ export function getFirebaseAdminDb(): Firestore | null {
     return null;
   }
 
+  if (cachedDb) {
+    return cachedDb;
+  }
+
   if (!cachedApp) {
     const existing = getApps();
     if (existing.length > 0) {
@@ -56,5 +61,16 @@ export function getFirebaseAdminDb(): Firestore | null {
     }
   }
 
-  return cachedApp ? getFirestore(cachedApp) : null;
+  if (!cachedApp) {
+    return null;
+  }
+
+  try {
+    // Use REST transport in serverless environments to avoid gRPC cold-start hangs
+    cachedDb = initializeFirestore(cachedApp, { preferRest: true });
+  } catch {
+    cachedDb = getFirestore(cachedApp);
+  }
+
+  return cachedDb;
 }
