@@ -271,6 +271,25 @@ async function fetchCPCBPage(
   return { records, total };
 }
 
+function logSafeBaseUrlDiagnostic(baseUrl: string): void {
+  const isEnvConfigured = Boolean(process.env.CPCB_API_BASE_URL?.trim());
+  let isExpectedHost = false;
+  try {
+    const parsed = new URL(baseUrl);
+    isExpectedHost = parsed.hostname === 'api.data.gov.in';
+  } catch {
+    isExpectedHost = false;
+  }
+
+  console.info(
+    JSON.stringify({
+      event: 'cpcb_base_url_check',
+      cpcbBaseUrlConfigured: isEnvConfigured,
+      isDataGovHost: isExpectedHost,
+    })
+  );
+}
+
 export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
   const apiKey = process.env.CPCB_API_KEY?.trim();
   const baseUrl =
@@ -280,6 +299,8 @@ export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
   if (!apiKey) {
     throw new CPCBError('CPCB_API_KEY_MISSING', 'CPCB_API_KEY is not configured', 503);
   }
+
+  logSafeBaseUrlDiagnostic(baseUrl);
 
   const PAGE_LIMIT = 2000;
   const MAX_PAGES = 3;
