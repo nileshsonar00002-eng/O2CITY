@@ -8,6 +8,8 @@ export interface MapplsLatLng {
 export interface MapplsMapInstance {
   setCenter: (center: [number, number] | MapplsLatLng) => void;
   setZoom: (zoom: number) => void;
+  getCenter?: () => unknown;
+  getZoom?: () => number;
   remove?: () => void;
   loaded?: () => boolean;
   addListener?: (event: string, cb: (eventData?: unknown) => void) => void;

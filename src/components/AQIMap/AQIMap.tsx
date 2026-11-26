@@ -1,9 +1,8 @@
 import { MapPin, RefreshCw } from 'lucide-react';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { isMapplsConfigured } from '../../config/env';
 import {
   loadMapplsSDK,
-  type MapplsGeoJsonFeature,
   type MapplsGlobal,
   type MapplsMapInstance,
   type MapplsMarkerInstance,
@@ -16,6 +15,7 @@ import {
   formatRelativeTime,
   getAQIMetaByValue,
 } from '../../utils/aqi';
+import { calculateDistanceKm } from '../../utils/geo';
 
 interface AQIMapProps {
   stations: readonly StationWithAQI[];
@@ -24,6 +24,75 @@ interface AQIMapProps {
   selectedStation?: StationWithAQI | null;
   onSelectStation?: (station: StationWithAQI) => void;
   heightClass?: string;
+}
+
+const PUNE_FALLBACK = { lat: 18.5204, lng: 73.8567 } as const;
+const NEARBY_RADIUS_KM = 50;
+const INITIAL_ZOOM = 11;
+const MOVE_DEBOUNCE_MS = 400;
+
+interface CleanStationPoint {
+  station: StationWithAQI;
+  lat: number;
+  lng: number;
+  aqi: number;
+}
+
+function getMarkerColor(aqi: number): string {
+  if (aqi <= 50) return '#00b050';
+  if (aqi <= 100) return '#92d050';
+  if (aqi <= 200) return '#ffc000';
+  if (aqi <= 300) return '#ff7c00';
+  if (aqi <= 400) return '#e53935';
+  return '#7e0023';
+}
+
+function parseCoordinate(raw: unknown): number {
+  if (typeof raw === 'number') return raw;
+  if (typeof raw === 'string' && raw.trim() !== '') return parseFloat(raw);
+  return NaN;
+}
+
+function parseAqiValue(raw: unknown): number {
+  if (raw === null || raw === undefined) return NaN;
+  if (typeof raw === 'string' && raw.trim() === '') return NaN;
+  return Number(raw);
+}
+
+function extractMapCenter(raw: unknown): { lat: number; lng: number } | null {
+  if (!raw) return null;
+  if (Array.isArray(raw) && raw.length >= 2) {
+    const lat = Number(raw[0]);
+    const lng = Number(raw[1]);
+    return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  }
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    const lat = Number(obj.lat ?? obj.latitude);
+    const lng = Number(obj.lng ?? obj.lon ?? obj.longitude);
+    return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  }
+  return null;
+}
+
+function removeMarkerInstance(
+  mappls: MapplsGlobal | undefined,
+  map: MapplsMapInstance | null,
+  marker: MapplsMarkerInstance | null
+): void {
+  if (!marker) return;
+  try {
+    marker.remove?.();
+  } catch {
+    // Ignore marker.remove errors
+  }
+  if (map && mappls?.remove) {
+    try {
+      mappls.remove({ map, layer: marker });
+    } catch {
+      // Ignore mappls.remove errors
+    }
+  }
 }
 
 function escapeHtml(input: string): string {
@@ -60,24 +129,6 @@ function buildPopupHtml(station: StationWithAQI): string {
   `;
 }
 
-function removeMapLayer(
-  mappls: MapplsGlobal | undefined,
-  map: MapplsMapInstance | null,
-  layer: MapplsMarkerInstance | null
-): void {
-  if (!layer || !map || !mappls?.remove) return;
-  try {
-    mappls.remove({ map, layer });
-  } catch {
-    // Ignore cleanup errors during map teardown or layer refresh
-  }
-}
-
-function createCategoryIconDataUrl(colorHex: string): string {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7" fill="${colorHex}" stroke="#ffffff" stroke-width="2.5"/></svg>`;
-  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
-}
-
 export function AQIMap({
   stations,
   meta,
@@ -90,10 +141,11 @@ export function AQIMap({
   const mapContainerId = `mappls-${containerId}`;
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<MapplsMapInstance | null>(null);
-  const bulkMarkerLayerRef = useRef<MapplsMarkerInstance | null>(null);
+  const markersRef = useRef<MapplsMarkerInstance[]>([]);
   const selectedMarkerRef = useRef<MapplsMarkerInstance | null>(null);
-  const stationsByIdRef = useRef<Map<string, StationWithAQI>>(new Map());
   const onSelectStationRef = useRef(onSelectStation);
+  const hasSelectedStationRef = useRef(Boolean(selectedStation));
+  const [activeCenter, setActiveCenter] = useState<{ lat: number; lng: number }>(PUNE_FALLBACK);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const mapplsEnabled = isMapplsConfigured();
@@ -103,25 +155,76 @@ export function AQIMap({
   }, [onSelectStation]);
 
   useEffect(() => {
-    const mapById = new Map<string, StationWithAQI>();
-    for (const s of stations) {
-      mapById.set(s.stationId, s);
+    hasSelectedStationRef.current = Boolean(selectedStation);
+  }, [selectedStation]);
+
+  // Clean and validate station coordinates + AQI once per stations fetch
+  const cleanedStations = useMemo<CleanStationPoint[]>(() => {
+    const valid: CleanStationPoint[] = [];
+    for (const station of stations) {
+      const lat = parseCoordinate(station.latitude);
+      const lng = parseCoordinate(station.longitude);
+      const aqi = parseAqiValue(station.aqi);
+
+      if (
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lng) ||
+        !Number.isFinite(aqi) ||
+        aqi < 0 ||
+        (lat === 0 && lng === 0)
+      ) {
+        continue;
+      }
+
+      valid.push({ station, lat, lng, aqi: Math.round(aqi) });
     }
-    stationsByIdRef.current = mapById;
+    return valid;
   }, [stations]);
 
-  // Initialize Mappls once and wait for genuine map load event
+  // Filter stations within 50 km of active map center using Haversine formula
+  const nearbyStations = useMemo<CleanStationPoint[]>(() => {
+    return cleanedStations.filter(
+      (item) =>
+        calculateDistanceKm(activeCenter.lat, activeCenter.lng, item.lat, item.lng) <=
+        NEARBY_RADIUS_KM
+    );
+  }, [cleanedStations, activeCenter]);
+
+  // Initialize Mappls once + request user geolocation + attach debounced move/zoom listeners
   useEffect(() => {
     if (!mapplsEnabled) return;
     let cancelled = false;
+    let debounceTimer: number | undefined;
+
+    if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          if (cancelled || hasSelectedStationRef.current) return;
+          const lat = Number(pos.coords.latitude);
+          const lng = Number(pos.coords.longitude);
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+          setActiveCenter({ lat, lng });
+          const map = mapInstanceRef.current;
+          if (map) {
+            map.setCenter([lat, lng]);
+            map.setZoom(INITIAL_ZOOM);
+          }
+        },
+        () => {
+          // Permission denied or unavailable -> keep Pune fallback center
+        },
+        { enableHighAccuracy: false, timeout: 6000, maximumAge: 300000 }
+      );
+    }
 
     loadMapplsSDK()
       .then((mappls) => {
         if (cancelled || !mapContainerRef.current || mapInstanceRef.current) return;
 
         const map = new mappls.Map(mapContainerId, {
-          center: [22.5937, 78.9629],
-          zoom: 4.5,
+          center: [PUNE_FALLBACK.lat, PUNE_FALLBACK.lng],
+          zoom: INITIAL_ZOOM,
           zoomControl: true,
           location: false,
           search: false,
@@ -141,15 +244,40 @@ export function AQIMap({
           }
         };
 
-        if (typeof map.addListener === 'function') {
-          map.addListener('load', markReady);
-          map.addListener('error', markError);
-          if (typeof map.loaded === 'function' && map.loaded()) {
-            markReady();
+        const handleViewportChange = () => {
+          if (cancelled) return;
+          if (debounceTimer !== undefined) {
+            window.clearTimeout(debounceTimer);
           }
-        } else if (typeof map.on === 'function') {
-          map.on('load', markReady);
-          map.on('error', markError);
+          debounceTimer = window.setTimeout(() => {
+            if (cancelled || !mapInstanceRef.current || typeof mapInstanceRef.current.getCenter !== 'function') {
+              return;
+            }
+            const nextCenter = extractMapCenter(mapInstanceRef.current.getCenter());
+            if (!nextCenter) return;
+            setActiveCenter((prev) => {
+              const movedEnough =
+                Math.abs(prev.lat - nextCenter.lat) > 0.001 ||
+                Math.abs(prev.lng - nextCenter.lng) > 0.001;
+              return movedEnough ? nextCenter : prev;
+            });
+          }, MOVE_DEBOUNCE_MS);
+        };
+
+        const bindEvent = (event: string, cb: () => void) => {
+          if (typeof map.addListener === 'function') {
+            map.addListener(event, cb);
+          } else if (typeof map.on === 'function') {
+            map.on(event, cb);
+          }
+        };
+
+        if (typeof map.addListener === 'function' || typeof map.on === 'function') {
+          bindEvent('load', markReady);
+          bindEvent('error', markError);
+          bindEvent('moveend', handleViewportChange);
+          bindEvent('dragend', handleViewportChange);
+          bindEvent('zoomend', handleViewportChange);
           if (typeof map.loaded === 'function' && map.loaded()) {
             markReady();
           }
@@ -167,14 +295,19 @@ export function AQIMap({
 
     return () => {
       cancelled = true;
+      if (debounceTimer !== undefined) {
+        window.clearTimeout(debounceTimer);
+      }
       const currentMap = mapInstanceRef.current;
       const mappls = window.mappls;
 
-      removeMapLayer(mappls, currentMap, selectedMarkerRef.current);
+      removeMarkerInstance(mappls, currentMap, selectedMarkerRef.current);
       selectedMarkerRef.current = null;
 
-      removeMapLayer(mappls, currentMap, bulkMarkerLayerRef.current);
-      bulkMarkerLayerRef.current = null;
+      for (const m of markersRef.current) {
+        removeMarkerInstance(mappls, currentMap, m);
+      }
+      markersRef.current = [];
 
       try {
         currentMap?.remove?.();
@@ -186,109 +319,71 @@ export function AQIMap({
     };
   }, [mapplsEnabled, mapContainerId]);
 
-  // Render unified GeoJSON bulk clustered markers (never rebuilt on selectedStation change)
+  // Render individual round AQI markers for stations within 50 km (no count clusters)
   useEffect(() => {
     const map = mapInstanceRef.current;
     const mappls = window.mappls;
     if (!mapReady || !map || !mappls) return;
 
-    removeMapLayer(mappls, map, bulkMarkerLayerRef.current);
-    bulkMarkerLayerRef.current = null;
+    for (const m of markersRef.current) {
+      removeMarkerInstance(mappls, map, m);
+    }
+    markersRef.current = [];
 
-    const features: MapplsGeoJsonFeature[] = [];
+    const createdMarkers: MapplsMarkerInstance[] = [];
 
-    for (const station of stations) {
-      if (!Number.isFinite(station.latitude) || !Number.isFinite(station.longitude)) {
-        continue;
+    for (const item of nearbyStations) {
+      const { station, lat, lng, aqi } = item;
+      const bgColor = getMarkerColor(aqi);
+      const size = 32;
+
+      const markerHtml = `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${bgColor};border:2px solid #ffffff;box-shadow:0 2px 6px rgba(15,23,42,0.32);display:flex;align-items:center;justify-content:center;color:#ffffff;font-weight:700;font-size:11px;font-family:Inter,system-ui,sans-serif;line-height:1;cursor:pointer;">${aqi}</div>`;
+
+      const marker = new mappls.Marker({
+        map,
+        position: { lat, lng },
+        html: markerHtml,
+        width: size,
+        height: size,
+        popupHtml: buildPopupHtml(station),
+      });
+
+      if (marker.addListener) {
+        marker.addListener('click', () => onSelectStationRef.current?.(station));
       }
 
-      const categoryMeta = getAQIMetaByValue(station.aqi);
-      features.push({
-        type: 'Feature',
-        properties: {
-          stationId: station.stationId,
-          icon: createCategoryIconDataUrl(categoryMeta.colorHex),
-          htmlPopup: buildPopupHtml(station),
-          colorHex: categoryMeta.colorHex,
-        },
-        geometry: {
-          type: 'Point',
-          coordinates: [station.longitude, station.latitude],
-        },
-      });
+      createdMarkers.push(marker);
     }
 
-    if (features.length === 0) return;
+    markersRef.current = createdMarkers;
+  }, [mapReady, nearbyStations]);
 
-    const layer = new mappls.Marker({
-      map,
-      position: {
-        type: 'FeatureCollection',
-        features,
-      },
-      cType: 1,
-      clusters: true,
-      clustersOptions: {
-        background: [
-          [2, '#10b981'],
-          [10, '#eab308'],
-          [25, '#f97316'],
-          [50, '#ef4444'],
-        ],
-        radius: [
-          [2, 16],
-          [10, 20],
-          [25, 26],
-          [50, 32],
-        ],
-        maxZoom: 10,
-      },
-    });
-
-    if (layer.addListener) {
-      layer.addListener('click', (eventData: unknown) => {
-        const payload = eventData as {
-          properties?: { stationId?: string };
-          features?: Array<{ properties?: { stationId?: string } }>;
-        } | null;
-        const clickedId =
-          payload?.properties?.stationId ?? payload?.features?.[0]?.properties?.stationId;
-        if (clickedId) {
-          const matched = stationsByIdRef.current.get(clickedId);
-          if (matched) {
-            onSelectStationRef.current?.(matched);
-          }
-        }
-      });
-    }
-
-    bulkMarkerLayerRef.current = layer;
-  }, [mapReady, stations]);
-
-  // Highlight selected station and pan smoothly without rebuilding bulk station markers
+  // Highlight selected station and pan smoothly
   useEffect(() => {
     const map = mapInstanceRef.current;
     const mappls = window.mappls;
     if (!mapReady || !map || !mappls) return;
 
-    removeMapLayer(mappls, map, selectedMarkerRef.current);
+    removeMarkerInstance(mappls, map, selectedMarkerRef.current);
     selectedMarkerRef.current = null;
 
-    if (
-      !selectedStation ||
-      !Number.isFinite(selectedStation.latitude) ||
-      !Number.isFinite(selectedStation.longitude)
-    ) {
-      return;
-    }
+    if (!selectedStation) return;
 
-    const categoryMeta = getAQIMetaByValue(selectedStation.aqi);
-    const size = 20;
-    const highlightHtml = `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${categoryMeta.colorHex};border:3px solid #0f172a;box-shadow:0 0 0 3px #ffffff,0 4px 10px rgba(15,23,42,0.4);cursor:pointer;"></div>`;
+    const lat = parseCoordinate(selectedStation.latitude);
+    const lng = parseCoordinate(selectedStation.longitude);
+    const aqiRaw = parseAqiValue(selectedStation.aqi);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const hasValidAqi = Number.isFinite(aqiRaw) && aqiRaw >= 0;
+    const roundedAqi = hasValidAqi ? Math.round(aqiRaw) : null;
+    const bgColor = roundedAqi !== null ? getMarkerColor(roundedAqi) : '#64748b';
+    const label = roundedAqi !== null ? String(roundedAqi) : '—';
+    const size = 36;
+    const highlightHtml = `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${bgColor};border:3px solid #0f172a;box-shadow:0 0 0 3px #ffffff,0 4px 10px rgba(15,23,42,0.4);display:flex;align-items:center;justify-content:center;color:#ffffff;font-weight:800;font-size:12px;font-family:Inter,system-ui,sans-serif;line-height:1;cursor:pointer;">${label}</div>`;
 
     const highlightMarker = new mappls.Marker({
       map,
-      position: { lat: selectedStation.latitude, lng: selectedStation.longitude },
+      position: { lat, lng },
       html: highlightHtml,
       width: size,
       height: size,
@@ -301,8 +396,8 @@ export function AQIMap({
 
     selectedMarkerRef.current = highlightMarker;
 
-    map.setCenter([selectedStation.latitude, selectedStation.longitude]);
-    map.setZoom(10);
+    map.setCenter([lat, lng]);
+    map.setZoom(INITIAL_ZOOM);
   }, [mapReady, selectedStation]);
 
   return (
