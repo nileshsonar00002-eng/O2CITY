@@ -9,13 +9,42 @@ export interface MapplsMapInstance {
   setCenter: (center: [number, number] | MapplsLatLng) => void;
   setZoom: (zoom: number) => void;
   remove?: () => void;
-  on?: (event: string, cb: () => void) => void;
+  loaded?: () => boolean;
+  addListener?: (event: string, cb: (eventData?: unknown) => void) => void;
+  on?: (event: string, cb: (eventData?: unknown) => void) => void;
+}
+
+export interface MapplsGeoJsonFeature {
+  type: 'Feature';
+  properties: {
+    stationId: string;
+    icon?: string;
+    htmlPopup?: string;
+    colorHex?: string;
+    [key: string]: unknown;
+  };
+  geometry: {
+    type: 'Point';
+    coordinates: [number, number]; // [lng, lat]
+  };
+}
+
+export interface MapplsGeoJsonFeatureCollection {
+  type: 'FeatureCollection';
+  features: MapplsGeoJsonFeature[];
+}
+
+export interface MapplsClustersOptions {
+  background?: Array<[number, string]>;
+  radius?: Array<[number, number]>;
+  maxZoom?: number;
+  [key: string]: unknown;
 }
 
 export interface MapplsMarkerInstance {
   remove?: () => void;
   setMap?: (map: MapplsMapInstance | null) => void;
-  addListener?: (event: string, cb: () => void) => void;
+  addListener?: (event: string, cb: (eventData?: unknown) => void) => void;
 }
 
 export interface MapplsGlobal {
@@ -31,17 +60,18 @@ export interface MapplsGlobal {
   ) => MapplsMapInstance;
   Marker: new (options: {
     map: MapplsMapInstance;
-    position: MapplsLatLng;
+    position: MapplsLatLng | MapplsGeoJsonFeatureCollection;
     html?: string;
+    icon?: string;
     width?: number;
     height?: number;
     popupHtml?: string;
     fitbounds?: boolean;
+    cType?: 0 | 1;
+    clusters?: boolean;
+    clustersOptions?: MapplsClustersOptions;
   }) => MapplsMarkerInstance;
-  markerCluster?: (options: {
-    map: MapplsMapInstance;
-    markers: MapplsMarkerInstance[];
-  }) => unknown;
+  remove?: (options: { map: MapplsMapInstance; layer: unknown }) => void;
 }
 
 declare global {
@@ -52,8 +82,35 @@ declare global {
 
 let sdkLoadPromise: Promise<MapplsGlobal> | null = null;
 
+function isMapplsReady(): boolean {
+  return Boolean(window.mappls && typeof window.mappls.Map === 'function');
+}
+
+function waitForMapplsGlobal(
+  resolve: (sdk: MapplsGlobal) => void,
+  reject: (err: Error) => void
+): void {
+  if (isMapplsReady() && window.mappls) {
+    resolve(window.mappls);
+    return;
+  }
+
+  let attempts = 0;
+  const interval = window.setInterval(() => {
+    attempts += 1;
+    if (isMapplsReady() && window.mappls) {
+      window.clearInterval(interval);
+      resolve(window.mappls);
+    } else if (attempts >= 20) {
+      window.clearInterval(interval);
+      sdkLoadPromise = null;
+      reject(new Error('Mappls SDK loaded without window.mappls.Map'));
+    }
+  }, 100);
+}
+
 /**
- * Loads the Mappls Maps Web SDK once per session.
+ * Loads the Mappls Maps Web SDK v3.0 once per session.
  * Never exposes or logs the Mappls key.
  */
 export function loadMapplsSDK(): Promise<MapplsGlobal> {
@@ -61,7 +118,7 @@ export function loadMapplsSDK(): Promise<MapplsGlobal> {
     return Promise.reject(new Error('Mappls SDK requires a browser environment'));
   }
 
-  if (window.mappls) {
+  if (isMapplsReady() && window.mappls) {
     return Promise.resolve(window.mappls);
   }
 
@@ -76,11 +133,19 @@ export function loadMapplsSDK(): Promise<MapplsGlobal> {
   sdkLoadPromise = new Promise<MapplsGlobal>((resolve, reject) => {
     const existing = document.querySelector<HTMLScriptElement>('script[data-o2city-mappls="true"]');
     if (existing) {
-      existing.addEventListener('load', () => {
-        if (window.mappls) resolve(window.mappls);
-        else reject(new Error('Mappls SDK failed to initialize'));
-      });
-      existing.addEventListener('error', () => reject(new Error('Failed to load Mappls SDK')));
+      if (isMapplsReady() && window.mappls) {
+        resolve(window.mappls);
+        return;
+      }
+      existing.addEventListener('load', () => waitForMapplsGlobal(resolve, reject), { once: true });
+      existing.addEventListener(
+        'error',
+        () => {
+          sdkLoadPromise = null;
+          reject(new Error('Failed to load Mappls SDK'));
+        },
+        { once: true }
+      );
       return;
     }
 
@@ -88,17 +153,12 @@ export function loadMapplsSDK(): Promise<MapplsGlobal> {
     script.dataset.o2cityMappls = 'true';
     script.async = true;
     script.defer = true;
-    script.src = `https://apis.mappls.com/advancedmaps/api/${encodeURIComponent(
-      publicConfig.mappls.mapKey
-    )}/map_sdk?layer=vector&v=3.0`;
+    script.src = `https://sdk.mappls.com/map/sdk/web?v=3.0&access_token=${encodeURIComponent(
+      publicConfig.mappls.mapKey.trim()
+    )}`;
 
     script.onload = () => {
-      if (window.mappls) {
-        resolve(window.mappls);
-      } else {
-        sdkLoadPromise = null;
-        reject(new Error('Mappls SDK loaded without window.mappls'));
-      }
+      waitForMapplsGlobal(resolve, reject);
     };
 
     script.onerror = () => {

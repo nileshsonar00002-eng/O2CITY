@@ -3,6 +3,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { isMapplsConfigured } from '../../config/env';
 import {
   loadMapplsSDK,
+  type MapplsGeoJsonFeature,
+  type MapplsGlobal,
   type MapplsMapInstance,
   type MapplsMarkerInstance,
 } from '../../services/mapplsService';
@@ -58,6 +60,24 @@ function buildPopupHtml(station: StationWithAQI): string {
   `;
 }
 
+function removeMapLayer(
+  mappls: MapplsGlobal | undefined,
+  map: MapplsMapInstance | null,
+  layer: MapplsMarkerInstance | null
+): void {
+  if (!layer || !map || !mappls?.remove) return;
+  try {
+    mappls.remove({ map, layer });
+  } catch {
+    // Ignore cleanup errors during map teardown or layer refresh
+  }
+}
+
+function createCategoryIconDataUrl(colorHex: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7" fill="${colorHex}" stroke="#ffffff" stroke-width="2.5"/></svg>`;
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
 export function AQIMap({
   stations,
   meta,
@@ -67,14 +87,30 @@ export function AQIMap({
   heightClass = 'h-[380px] sm:h-[440px]',
 }: AQIMapProps) {
   const containerId = useId().replace(/:/g, '');
+  const mapContainerId = `mappls-${containerId}`;
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<MapplsMapInstance | null>(null);
-  const markersRef = useRef<MapplsMarkerInstance[]>([]);
+  const bulkMarkerLayerRef = useRef<MapplsMarkerInstance | null>(null);
+  const selectedMarkerRef = useRef<MapplsMarkerInstance | null>(null);
+  const stationsByIdRef = useRef<Map<string, StationWithAQI>>(new Map());
+  const onSelectStationRef = useRef(onSelectStation);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const mapplsEnabled = isMapplsConfigured();
 
-  // Initialize Mappls once
+  useEffect(() => {
+    onSelectStationRef.current = onSelectStation;
+  }, [onSelectStation]);
+
+  useEffect(() => {
+    const mapById = new Map<string, StationWithAQI>();
+    for (const s of stations) {
+      mapById.set(s.stationId, s);
+    }
+    stationsByIdRef.current = mapById;
+  }, [stations]);
+
+  // Initialize Mappls once and wait for genuine map load event
   useEffect(() => {
     if (!mapplsEnabled) return;
     let cancelled = false;
@@ -83,7 +119,7 @@ export function AQIMap({
       .then((mappls) => {
         if (cancelled || !mapContainerRef.current || mapInstanceRef.current) return;
 
-        const map = new mappls.Map(mapContainerRef.current, {
+        const map = new mappls.Map(mapContainerId, {
           center: [22.5937, 78.9629],
           zoom: 4.5,
           zoomControl: true,
@@ -92,7 +128,36 @@ export function AQIMap({
         });
 
         mapInstanceRef.current = map;
-        setMapReady(true);
+
+        const markReady = () => {
+          if (!cancelled) {
+            setMapReady(true);
+          }
+        };
+
+        const markError = () => {
+          if (!cancelled) {
+            setMapError('Unable to load Mappls map right now.');
+          }
+        };
+
+        if (typeof map.addListener === 'function') {
+          map.addListener('load', markReady);
+          map.addListener('error', markError);
+          if (typeof map.loaded === 'function' && map.loaded()) {
+            markReady();
+          }
+        } else if (typeof map.on === 'function') {
+          map.on('load', markReady);
+          map.on('error', markError);
+          if (typeof map.loaded === 'function' && map.loaded()) {
+            markReady();
+          }
+        } else if (typeof map.loaded === 'function' && map.loaded()) {
+          markReady();
+        } else {
+          markError();
+        }
       })
       .catch(() => {
         if (!cancelled) {
@@ -102,23 +167,35 @@ export function AQIMap({
 
     return () => {
       cancelled = true;
-      markersRef.current.forEach((m) => m.remove?.());
-      markersRef.current = [];
-      mapInstanceRef.current?.remove?.();
-      mapInstanceRef.current = null;
-    };
-  }, [mapplsEnabled]);
+      const currentMap = mapInstanceRef.current;
+      const mappls = window.mappls;
 
-  // Update markers efficiently without reinitializing the map
+      removeMapLayer(mappls, currentMap, selectedMarkerRef.current);
+      selectedMarkerRef.current = null;
+
+      removeMapLayer(mappls, currentMap, bulkMarkerLayerRef.current);
+      bulkMarkerLayerRef.current = null;
+
+      try {
+        currentMap?.remove?.();
+      } catch {
+        // Ignore cleanup errors
+      }
+      mapInstanceRef.current = null;
+      setMapReady(false);
+    };
+  }, [mapplsEnabled, mapContainerId]);
+
+  // Render unified GeoJSON bulk clustered markers (never rebuilt on selectedStation change)
   useEffect(() => {
     const map = mapInstanceRef.current;
     const mappls = window.mappls;
     if (!mapReady || !map || !mappls) return;
 
-    markersRef.current.forEach((m) => m.remove?.());
-    markersRef.current = [];
+    removeMapLayer(mappls, map, bulkMarkerLayerRef.current);
+    bulkMarkerLayerRef.current = null;
 
-    const createdMarkers: MapplsMarkerInstance[] = [];
+    const features: MapplsGeoJsonFeature[] = [];
 
     for (const station of stations) {
       if (!Number.isFinite(station.latitude) || !Number.isFinite(station.longitude)) {
@@ -126,45 +203,106 @@ export function AQIMap({
       }
 
       const categoryMeta = getAQIMetaByValue(station.aqi);
-      const isSelected = selectedStation?.stationId === station.stationId;
-      const size = isSelected ? 18 : 13;
-
-      const markerHtml = `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${categoryMeta.colorHex};border:2px solid #ffffff;box-shadow:0 1px 4px rgba(15,23,42,0.35);cursor:pointer;"></div>`;
-
-      const marker = new mappls.Marker({
-        map,
-        position: { lat: station.latitude, lng: station.longitude },
-        html: markerHtml,
-        width: size,
-        height: size,
-        popupHtml: buildPopupHtml(station),
+      features.push({
+        type: 'Feature',
+        properties: {
+          stationId: station.stationId,
+          icon: createCategoryIconDataUrl(categoryMeta.colorHex),
+          htmlPopup: buildPopupHtml(station),
+          colorHex: categoryMeta.colorHex,
+        },
+        geometry: {
+          type: 'Point',
+          coordinates: [station.longitude, station.latitude],
+        },
       });
-
-      if (onSelectStation && marker.addListener) {
-        marker.addListener('click', () => onSelectStation(station));
-      }
-
-      createdMarkers.push(marker);
     }
 
-    if (createdMarkers.length > 0 && mappls.markerCluster) {
-      mappls.markerCluster({ map, markers: createdMarkers });
+    if (features.length === 0) return;
+
+    const layer = new mappls.Marker({
+      map,
+      position: {
+        type: 'FeatureCollection',
+        features,
+      },
+      cType: 1,
+      clusters: true,
+      clustersOptions: {
+        background: [
+          [2, '#10b981'],
+          [10, '#eab308'],
+          [25, '#f97316'],
+          [50, '#ef4444'],
+        ],
+        radius: [
+          [2, 16],
+          [10, 20],
+          [25, 26],
+          [50, 32],
+        ],
+        maxZoom: 10,
+      },
+    });
+
+    if (layer.addListener) {
+      layer.addListener('click', (eventData: unknown) => {
+        const payload = eventData as {
+          properties?: { stationId?: string };
+          features?: Array<{ properties?: { stationId?: string } }>;
+        } | null;
+        const clickedId =
+          payload?.properties?.stationId ?? payload?.features?.[0]?.properties?.stationId;
+        if (clickedId) {
+          const matched = stationsByIdRef.current.get(clickedId);
+          if (matched) {
+            onSelectStationRef.current?.(matched);
+          }
+        }
+      });
     }
 
-    markersRef.current = createdMarkers;
-  }, [mapReady, stations, selectedStation, onSelectStation]);
+    bulkMarkerLayerRef.current = layer;
+  }, [mapReady, stations]);
 
-  // Smoothly pan to selected station
+  // Highlight selected station and pan smoothly without rebuilding bulk station markers
   useEffect(() => {
     const map = mapInstanceRef.current;
-    if (!mapReady || !map || !selectedStation) return;
+    const mappls = window.mappls;
+    if (!mapReady || !map || !mappls) return;
+
+    removeMapLayer(mappls, map, selectedMarkerRef.current);
+    selectedMarkerRef.current = null;
+
     if (
-      Number.isFinite(selectedStation.latitude) &&
-      Number.isFinite(selectedStation.longitude)
+      !selectedStation ||
+      !Number.isFinite(selectedStation.latitude) ||
+      !Number.isFinite(selectedStation.longitude)
     ) {
-      map.setCenter([selectedStation.latitude, selectedStation.longitude]);
-      map.setZoom(10);
+      return;
     }
+
+    const categoryMeta = getAQIMetaByValue(selectedStation.aqi);
+    const size = 20;
+    const highlightHtml = `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${categoryMeta.colorHex};border:3px solid #0f172a;box-shadow:0 0 0 3px #ffffff,0 4px 10px rgba(15,23,42,0.4);cursor:pointer;"></div>`;
+
+    const highlightMarker = new mappls.Marker({
+      map,
+      position: { lat: selectedStation.latitude, lng: selectedStation.longitude },
+      html: highlightHtml,
+      width: size,
+      height: size,
+      popupHtml: buildPopupHtml(selectedStation),
+    });
+
+    if (highlightMarker.addListener) {
+      highlightMarker.addListener('click', () => onSelectStationRef.current?.(selectedStation));
+    }
+
+    selectedMarkerRef.current = highlightMarker;
+
+    map.setCenter([selectedStation.latitude, selectedStation.longitude]);
+    map.setZoom(10);
   }, [mapReady, selectedStation]);
 
   return (
