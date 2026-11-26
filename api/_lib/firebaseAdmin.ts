@@ -21,7 +21,8 @@ export function getFirebaseAdminDb(): Firestore | null {
     if (existing.length > 0) {
       cachedApp = existing[0] ?? null;
     } else {
-      const privateKey = process.env.FIREBASE_PRIVATE_KEY!.replace(/\\n/g, '\n');
+      const rawKey = process.env.FIREBASE_PRIVATE_KEY!.trim();
+      const privateKey = rawKey.replace(/^["']|["']$/g, '').replace(/\\n/g, '\n');
       cachedApp = initializeApp({
         credential: cert({
           projectId: process.env.FIREBASE_PROJECT_ID,

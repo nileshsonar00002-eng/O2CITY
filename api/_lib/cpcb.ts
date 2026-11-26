@@ -147,15 +147,34 @@ function parseNumeric(val: string | number | undefined): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
+function parsePollutantValue(val: string | number | undefined): number | null {
+  const num = parseNumeric(val);
+  if (num === null || num < 0 || num > 5000) return null;
+  return Math.round(num * 100) / 100;
+}
+
+function isValidIndianCoordinate(lat: number | null, lon: number | null): lat is number {
+  return (
+    lat !== null &&
+    lon !== null &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lon) &&
+    lat >= 5 &&
+    lat <= 38 &&
+    lon >= 67 &&
+    lon <= 98
+  );
+}
+
 function parseCpcbTimestamp(raw: string | undefined): string | null {
   if (!raw) return null;
-  // CPCB format is typically "DD-MM-YYYY HH:MM:SS" or ISO
   const trimmed = raw.trim();
   const ddmmyyyy = /^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(trimmed);
   if (ddmmyyyy) {
     const [, dd, mm, yyyy, hh, min, ss = '00'] = ddmmyyyy;
-    // IST is UTC+05:30
-    return new Date(`${yyyy}-${mm}-${dd}T${hh}:${min}:${ss}+05:30`).toISOString();
+    const iso = `${yyyy}-${mm}-${dd}T${hh}:${min}:${ss}+05:30`;
+    const parsed = Date.parse(iso);
+    return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
   }
   const parsed = Date.parse(trimmed);
   return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
@@ -164,6 +183,56 @@ function parseCpcbTimestamp(raw: string | undefined): string | null {
 export interface ParsedCPCBResult {
   stations: NormalizedStation[];
   readings: NormalizedAQI[];
+  totalRawRecords: number;
+  skippedCount: number;
+}
+
+async function fetchCPCBPage(
+  baseUrl: string,
+  apiKey: string,
+  offset: number,
+  limit: number
+): Promise<{ records: CPCBRecordRaw[]; total: number }> {
+  const url = new URL(baseUrl);
+  url.searchParams.set('api-key', apiKey);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('limit', String(limit));
+  url.searchParams.set('offset', String(offset));
+
+  const response = await fetch(url.toString(), {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (response.status === 429) {
+    throw new Error('CPCB upstream rate limit reached');
+  }
+
+  if (!response.ok) {
+    throw new Error(`CPCB upstream responded with status ${response.status}`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error('Malformed JSON from CPCB upstream');
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Unexpected payload structure from CPCB upstream');
+  }
+
+  const typed = payload as { records?: unknown; total?: unknown };
+  const records = Array.isArray(typed.records) ? (typed.records as CPCBRecordRaw[]) : [];
+  const total =
+    typeof typed.total === 'number'
+      ? typed.total
+      : typeof typed.total === 'string'
+        ? Number.parseInt(typed.total, 10) || records.length
+        : records.length;
+
+  return { records, total };
 }
 
 export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
@@ -176,22 +245,22 @@ export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
     throw new Error('CPCB_API_KEY is not configured');
   }
 
-  const url = new URL(baseUrl);
-  url.searchParams.set('api-key', apiKey);
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('limit', '2000');
+  const PAGE_LIMIT = 2000;
+  const MAX_PAGES = 3;
+  const allRecords: CPCBRecordRaw[] = [];
 
-  const response = await fetch(url.toString(), {
-    headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`CPCB API responded with status ${response.status}`);
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const offset = page * PAGE_LIMIT;
+    const { records, total } = await fetchCPCBPage(baseUrl, apiKey, offset, PAGE_LIMIT);
+    allRecords.push(...records);
+    if (records.length < PAGE_LIMIT || allRecords.length >= total) {
+      break;
+    }
   }
 
-  const payload = (await response.json()) as { records?: CPCBRecordRaw[] };
-  const records = Array.isArray(payload.records) ? payload.records : [];
+  if (allRecords.length === 0) {
+    throw new Error('CPCB upstream returned an empty dataset');
+  }
 
   const stationMap = new Map<
     string,
@@ -203,21 +272,27 @@ export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
   >();
 
   const fetchedAt = new Date().toISOString();
+  let skippedCount = 0;
 
-  for (const row of records) {
+  for (const row of allRecords) {
     const stationName = row.station?.trim();
     const city = row.city?.trim();
     const state = row.state?.trim() || 'India';
     const lat = parseNumeric(row.latitude);
     const lon = parseNumeric(row.longitude);
 
-    if (!stationName || !city || lat === null || lon === null) {
+    if (!stationName || !city || !isValidIndianCoordinate(lat, lon)) {
+      skippedCount += 1;
       continue;
     }
 
     const stationId = toStationId(state, city, stationName);
-    let entry = stationMap.get(stationId);
+    if (stationId.length < 2) {
+      skippedCount += 1;
+      continue;
+    }
 
+    let entry = stationMap.get(stationId);
     if (!entry) {
       entry = {
         station: {
@@ -226,7 +301,7 @@ export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
           city,
           state,
           latitude: lat,
-          longitude: lon,
+          longitude: lon as number,
           active: true,
           source: 'CPCB / data.gov.in',
         },
@@ -244,7 +319,7 @@ export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
       stationMap.set(stationId, entry);
     }
 
-    const avgVal = parseNumeric(row.pollutant_avg);
+    const avgVal = parsePollutantValue(row.pollutant_avg);
     const pid = (row.pollutant_id ?? '').trim().toUpperCase();
 
     if (pid === 'PM2.5') entry.pollutants.pm25 = avgVal;
@@ -284,5 +359,10 @@ export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
     });
   }
 
-  return { stations, readings };
+  return {
+    stations,
+    readings,
+    totalRawRecords: allRecords.length,
+    skippedCount,
+  };
 }

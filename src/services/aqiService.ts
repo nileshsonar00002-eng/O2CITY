@@ -10,14 +10,26 @@ export interface LatestAQIResponse {
 
 export async function fetchLatestAQI(): Promise<LatestAQIResponse> {
   try {
-    const response = await fetch('/api/aqi/latest', {
+    const response = await fetch('/api/stations/latest', {
       headers: { Accept: 'application/json' },
     });
 
     if (response.ok) {
-      const data = (await response.json()) as LatestAQIResponse;
+      const data = (await response.json()) as Partial<LatestAQIResponse> & {
+        count?: number;
+        lastUpdated?: string | null;
+        dataStatus?: LatestAQIResponse['meta']['dataStatus'];
+      };
       if (Array.isArray(data.stations)) {
-        return data;
+        return {
+          stations: data.stations,
+          meta: data.meta ?? {
+            totalStations: data.count ?? data.stations.length,
+            lastUpdated: data.lastUpdated ?? null,
+            dataStatus: data.dataStatus ?? 'live',
+            source: 'CPCB / data.gov.in via O2CITY',
+          },
+        };
       }
     }
   } catch {
