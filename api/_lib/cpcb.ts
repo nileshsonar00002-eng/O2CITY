@@ -199,6 +199,47 @@ export class CPCBError extends Error {
   }
 }
 
+function sanitizeErrorText(input: string): string {
+  return input
+    .replace(/https?:\/\/\S+/gi, '[redacted-url]')
+    .replace(/api-key=[^&\s]+/gi, 'api-key=[redacted]')
+    .slice(0, 200);
+}
+
+function classifyNetworkFailure(
+  errorName: string,
+  causeCode: string | null
+): 'DNS' | 'TLS' | 'CONNECTION_RESET' | 'CONNECTION_TIMEOUT' | 'OTHER' {
+  if (
+    errorName === 'TimeoutError' ||
+    causeCode === 'UND_ERR_CONNECT_TIMEOUT' ||
+    causeCode === 'ETIMEDOUT'
+  ) {
+    return 'CONNECTION_TIMEOUT';
+  }
+  if (causeCode === 'ENOTFOUND' || causeCode === 'EAI_AGAIN' || causeCode === 'EAI_FAIL') {
+    return 'DNS';
+  }
+  if (
+    causeCode &&
+    (causeCode.startsWith('CERT_') ||
+      causeCode.startsWith('ERR_TLS_') ||
+      causeCode === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+      causeCode === 'DEPTH_ZERO_SELF_SIGNED_CERT')
+  ) {
+    return 'TLS';
+  }
+  if (
+    causeCode === 'ECONNRESET' ||
+    causeCode === 'EPIPE' ||
+    causeCode === 'UND_ERR_SOCKET' ||
+    causeCode === 'ECONNREFUSED'
+  ) {
+    return 'CONNECTION_RESET';
+  }
+  return 'OTHER';
+}
+
 async function fetchCPCBPage(
   baseUrl: string,
   apiKey: string,
@@ -224,10 +265,36 @@ async function fetchCPCBPage(
       signal: AbortSignal.timeout(7_000),
     });
   } catch (err) {
-    const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+    const errorName = err instanceof Error ? err.name : 'UnknownError';
+    const errorMessage = err instanceof Error ? sanitizeErrorText(err.message) : 'Unknown error';
+    const causeObj =
+      err instanceof Error && err.cause && typeof err.cause === 'object'
+        ? (err.cause as { code?: unknown; message?: unknown })
+        : null;
+    const causeCode = causeObj && typeof causeObj.code === 'string' ? causeObj.code : null;
+    const causeMessage =
+      causeObj && typeof causeObj.message === 'string'
+        ? sanitizeErrorText(causeObj.message)
+        : null;
+    const category = classifyNetworkFailure(errorName, causeCode);
+
+    console.error(
+      JSON.stringify({
+        event: 'cpcb_fetch_network_detail',
+        category,
+        errorName,
+        errorMessage,
+        causeCode,
+        causeMessage,
+      })
+    );
+
+    const isTimeout = errorName === 'TimeoutError';
     throw new CPCBError(
       isTimeout ? 'CPCB_TIMEOUT' : 'CPCB_NETWORK_ERROR',
-      isTimeout ? 'CPCB upstream request timed out' : 'Network error reaching CPCB upstream',
+      isTimeout
+        ? 'CPCB upstream request timed out'
+        : `Network error reaching CPCB upstream (${category}${causeCode ? `: ${causeCode}` : ''})`,
       isTimeout ? 504 : 502
     );
   }
