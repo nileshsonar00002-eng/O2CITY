@@ -1,3 +1,4 @@
+import type { Firestore } from 'firebase-admin/firestore';
 import type { NormalizedAQI, NormalizedStation } from './cpcb.js';
 import { getFirebaseAdminDb } from './firebaseAdmin.js';
 
@@ -9,22 +10,46 @@ export interface IngestSummary {
   timestamp: string;
 }
 
+export class FirestoreIngestError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'FirestoreIngestError';
+    this.code = code;
+  }
+}
+
 /**
  * Idempotently writes normalized stations, latest readings, and deterministic history snapshots
- * to Cloud Firestore via Firebase Admin SDK.
+ * to Cloud Firestore via Firebase Admin SDK using parallel batch commits.
  */
 export async function persistIngestedData(
   stations: readonly NormalizedStation[],
   readings: readonly NormalizedAQI[],
   skippedCount: number
 ): Promise<IngestSummary> {
-  const db = getFirebaseAdminDb();
+  let db: Firestore | null;
+  try {
+    db = getFirebaseAdminDb();
+  } catch (err) {
+    const code =
+      err instanceof Error && err.message === 'FIREBASE_PRIVATE_KEY_INVALID_FORMAT'
+        ? 'FIREBASE_PRIVATE_KEY_INVALID_FORMAT'
+        : 'FIREBASE_INIT_FAILED';
+    throw new FirestoreIngestError(code, 'Failed to initialize Firebase Admin SDK');
+  }
+
   if (!db) {
-    throw new Error('Firebase Admin SDK is not configured');
+    throw new FirestoreIngestError(
+      'FIREBASE_NOT_CONFIGURED',
+      'Firebase Admin SDK credentials are missing'
+    );
   }
 
   const CHUNK_SIZE = 150;
   let updated = 0;
+  const commitPromises: Promise<unknown>[] = [];
 
   for (let i = 0; i < stations.length; i += CHUNK_SIZE) {
     const batch = db.batch();
@@ -59,7 +84,20 @@ export async function persistIngestedData(
       }
     }
 
-    await batch.commit();
+    commitPromises.push(batch.commit());
+  }
+
+  try {
+    await Promise.all(commitPromises);
+  } catch (err) {
+    const errCode =
+      err && typeof err === 'object' && 'code' in err
+        ? String((err as { code: unknown }).code)
+        : 'FIRESTORE_BATCH_COMMIT_FAILED';
+    throw new FirestoreIngestError(
+      'FIRESTORE_WRITE_FAILED',
+      `Firestore batch commit failed (${errCode})`
+    );
   }
 
   return {

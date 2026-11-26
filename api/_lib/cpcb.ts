@@ -187,40 +187,76 @@ export interface ParsedCPCBResult {
   skippedCount: number;
 }
 
+export class CPCBError extends Error {
+  readonly code: string;
+  readonly statusCode: number;
+
+  constructor(code: string, message: string, statusCode = 502) {
+    super(message);
+    this.name = 'CPCBError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
 async function fetchCPCBPage(
   baseUrl: string,
   apiKey: string,
   offset: number,
   limit: number
 ): Promise<{ records: CPCBRecordRaw[]; total: number }> {
-  const url = new URL(baseUrl);
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new CPCBError('CPCB_INVALID_BASE_URL', 'CPCB_API_BASE_URL is not a valid URL', 503);
+  }
+
   url.searchParams.set('api-key', apiKey);
   url.searchParams.set('format', 'json');
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('offset', String(offset));
 
-  const response = await fetch(url.toString(), {
-    headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(15_000),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(7_000),
+    });
+  } catch (err) {
+    const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+    throw new CPCBError(
+      isTimeout ? 'CPCB_TIMEOUT' : 'CPCB_NETWORK_ERROR',
+      isTimeout ? 'CPCB upstream request timed out' : 'Network error reaching CPCB upstream',
+      isTimeout ? 504 : 502
+    );
+  }
 
   if (response.status === 429) {
-    throw new Error('CPCB upstream rate limit reached');
+    throw new CPCBError('CPCB_RATE_LIMITED', 'CPCB upstream rate limit reached', 429);
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    throw new CPCBError('CPCB_AUTH_REJECTED', 'CPCB upstream rejected credentials', 502);
   }
 
   if (!response.ok) {
-    throw new Error(`CPCB upstream responded with status ${response.status}`);
+    throw new CPCBError(
+      'CPCB_HTTP_ERROR',
+      `CPCB upstream responded with status ${response.status}`,
+      502
+    );
   }
 
   let payload: unknown;
   try {
     payload = await response.json();
   } catch {
-    throw new Error('Malformed JSON from CPCB upstream');
+    throw new CPCBError('CPCB_MALFORMED_JSON', 'Malformed JSON from CPCB upstream', 502);
   }
 
   if (!payload || typeof payload !== 'object') {
-    throw new Error('Unexpected payload structure from CPCB upstream');
+    throw new CPCBError('CPCB_INVALID_PAYLOAD', 'Unexpected payload structure from CPCB upstream', 502);
   }
 
   const typed = payload as { records?: unknown; total?: unknown };
@@ -236,30 +272,38 @@ async function fetchCPCBPage(
 }
 
 export async function fetchCPCBData(): Promise<ParsedCPCBResult> {
-  const apiKey = process.env.CPCB_API_KEY;
+  const apiKey = process.env.CPCB_API_KEY?.trim();
   const baseUrl =
-    process.env.CPCB_API_BASE_URL ||
+    process.env.CPCB_API_BASE_URL?.trim() ||
     'https://api.data.gov.in/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69';
 
   if (!apiKey) {
-    throw new Error('CPCB_API_KEY is not configured');
+    throw new CPCBError('CPCB_API_KEY_MISSING', 'CPCB_API_KEY is not configured', 503);
   }
 
   const PAGE_LIMIT = 2000;
   const MAX_PAGES = 3;
-  const allRecords: CPCBRecordRaw[] = [];
 
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const offset = page * PAGE_LIMIT;
-    const { records, total } = await fetchCPCBPage(baseUrl, apiKey, offset, PAGE_LIMIT);
-    allRecords.push(...records);
-    if (records.length < PAGE_LIMIT || allRecords.length >= total) {
-      break;
+  const firstPage = await fetchCPCBPage(baseUrl, apiKey, 0, PAGE_LIMIT);
+  const allRecords: CPCBRecordRaw[] = [...firstPage.records];
+
+  if (firstPage.records.length === PAGE_LIMIT && firstPage.total > PAGE_LIMIT) {
+    const remainingPages = Math.min(
+      MAX_PAGES - 1,
+      Math.ceil((firstPage.total - PAGE_LIMIT) / PAGE_LIMIT)
+    );
+    const pagePromises: Promise<{ records: CPCBRecordRaw[]; total: number }>[] = [];
+    for (let p = 1; p <= remainingPages; p++) {
+      pagePromises.push(fetchCPCBPage(baseUrl, apiKey, p * PAGE_LIMIT, PAGE_LIMIT));
+    }
+    const extraPages = await Promise.all(pagePromises);
+    for (const page of extraPages) {
+      allRecords.push(...page.records);
     }
   }
 
   if (allRecords.length === 0) {
-    throw new Error('CPCB upstream returned an empty dataset');
+    throw new CPCBError('CPCB_EMPTY_DATASET', 'CPCB upstream returned an empty dataset', 502);
   }
 
   const stationMap = new Map<
