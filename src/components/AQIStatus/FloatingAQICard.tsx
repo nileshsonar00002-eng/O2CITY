@@ -1,6 +1,5 @@
-import { ArrowUpRight, CloudSun, LocateFixed, Share2, Wind, Activity } from 'lucide-react';
+import { CloudSun, LocateFixed, Share2, Wind, Activity } from 'lucide-react';
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useWeather } from '../../hooks/useWeather';
 import type { StationWithAQI } from '../../types/station';
 import {
@@ -40,7 +39,7 @@ export function FloatingAQICard({
   } = useWeather(
     station?.latitude ?? null,
     station?.longitude ?? null,
-    activeTab === 'weather'
+    activeTab === 'aqi' || activeTab === 'weather'
   );
 
   const meta = getAQIMetaByValue(station?.aqi ?? null);
@@ -112,7 +111,7 @@ export function FloatingAQICard({
       <div
         className="relative overflow-hidden rounded-2xl rounded-tl-none border border-slate-200/80 bg-white shadow-xl shadow-slate-900/10"
         style={{
-          backgroundImage: `linear-gradient(180deg, #ffffff 32%, ${meta.colorHex}26 100%)`,
+          backgroundImage: `linear-gradient(180deg, #ffffff 22%, ${meta.colorHex}73 55%, ${meta.colorHex}cc 100%)`,
         }}
       >
         {/* Subtle City Skyline Silhouette at Bottom */}
@@ -120,7 +119,7 @@ export function FloatingAQICard({
           aria-hidden="true"
           viewBox="0 0 1200 120"
           preserveAspectRatio="none"
-          className="pointer-events-none absolute right-0 bottom-0 left-0 h-10 w-full opacity-[0.07]"
+          className="pointer-events-none absolute right-0 bottom-0 left-0 h-10 w-full opacity-[0.22]"
         >
           <path
             fill={meta.colorHex}
@@ -210,7 +209,7 @@ export function FloatingAQICard({
                       >
                         {aqiValue !== null ? aqiValue : '—'}
                       </span>
-                      <span className="text-[11px] font-semibold text-slate-500">AQI (CPCB)</span>
+                      <span className="text-[11px] font-semibold text-slate-700">AQI (CPCB)</span>
                     </div>
                   </div>
 
@@ -230,16 +229,16 @@ export function FloatingAQICard({
                 </div>
 
                 {/* PM2.5 & PM10 Row */}
-                <div className="flex flex-wrap items-center gap-4 text-xs text-slate-700">
+                <div className="flex flex-wrap items-center gap-4 text-xs text-slate-800">
                   <div>
-                    <span className="text-slate-500">PM2.5 : </span>
-                    <span className="font-mono font-bold text-slate-900">
+                    <span className="font-medium text-slate-800">PM2.5 : </span>
+                    <span className="font-mono font-bold text-slate-950">
                       {formatPollutantValue(station?.pollutants.pm25 ?? null)}
                     </span>
                   </div>
                   <div>
-                    <span className="text-slate-500">PM10 : </span>
-                    <span className="font-mono font-bold text-slate-900">
+                    <span className="font-medium text-slate-800">PM10 : </span>
+                    <span className="font-mono font-bold text-slate-950">
                       {formatPollutantValue(station?.pollutants.pm10 ?? null)}
                     </span>
                   </div>
@@ -247,7 +246,7 @@ export function FloatingAQICard({
 
                 {/* Segmented AQI Scale Bar */}
                 <div className="max-w-md pt-0.5">
-                  <div className="mb-0.5 flex justify-between text-[9px] font-semibold text-slate-600">
+                  <div className="mb-0.5 flex justify-between text-[9px] font-bold text-slate-900">
                     <span>Good</span>
                     <span>Satisfactory</span>
                     <span>Moderate</span>
@@ -275,7 +274,7 @@ export function FloatingAQICard({
                       />
                     )}
                   </div>
-                  <div className="mt-0.5 flex justify-between font-mono text-[9px] text-slate-500">
+                  <div className="mt-0.5 flex justify-between font-mono text-[9px] font-semibold text-slate-900">
                     <span>0</span>
                     <span>50</span>
                     <span>100</span>
@@ -287,44 +286,15 @@ export function FloatingAQICard({
                 </div>
               </div>
 
-              {/* Right: Frosted Telemetry & Advisory Card */}
+              {/* Right: Compact Weather Card */}
               <div className="lg:col-span-5">
-                <div className="relative rounded-xl border border-white/80 bg-white/70 p-2.5 shadow-sm backdrop-blur-md">
-                  <Link
-                    to="/map"
-                    title="Open full India AQI map"
-                    aria-label="Open full India AQI map"
-                    className="absolute -top-2 -right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-slate-900 text-white shadow-md transition-transform hover:scale-105"
-                  >
-                    <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
-                  </Link>
-
-                  <p className="pr-5 text-[11px] font-semibold text-slate-800">
-                    Health Advisory ({meta.category})
-                  </p>
-                  <p className="mt-0.5 text-[11px] leading-snug text-slate-600">{meta.advisory}</p>
-
-                  <div className="mt-1.5 grid grid-cols-3 gap-1.5 border-t border-slate-200/70 pt-1.5 text-center">
-                    <div>
-                      <span className="block text-[9px] font-semibold text-slate-500">NO₂</span>
-                      <span className="mt-0.5 block font-mono text-[11px] font-bold text-slate-900">
-                        {formatPollutantValue(station?.pollutants.no2 ?? null)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="block text-[9px] font-semibold text-slate-500">SO₂</span>
-                      <span className="mt-0.5 block font-mono text-[11px] font-bold text-slate-900">
-                        {formatPollutantValue(station?.pollutants.so2 ?? null)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="block text-[9px] font-semibold text-slate-500">O₃</span>
-                      <span className="mt-0.5 block font-mono text-[11px] font-bold text-slate-900">
-                        {formatPollutantValue(station?.pollutants.o3 ?? null)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
+                <CompactWeatherCard
+                  weather={weather}
+                  isLoading={isWeatherLoading}
+                  error={weatherError}
+                  hasStation={station !== null}
+                  variant="inline"
+                />
               </div>
             </div>
           ) : activeTab === 'pollutants' ? (

@@ -1,4 +1,4 @@
-import { LocateFixed, MapPin, RefreshCw, X } from 'lucide-react';
+import { MapPin, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { isMapplsConfigured } from '../../config/env';
 import {
@@ -138,7 +138,7 @@ function buildPopupHtml(station: StationWithAQI): string {
 
 export function AQIMap({
   stations,
-  meta,
+  meta: _meta,
   isLoading,
   selectedStation,
   onSelectStation,
@@ -161,9 +161,88 @@ export function AQIMap({
   const [activeCenter, setActiveCenter] = useState<{ lat: number; lng: number }>(PUNE_FALLBACK);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
-  const [isLocatingUser, setIsLocatingUser] = useState(false);
   const [activePopupStation, setActivePopupStation] = useState<StationWithAQI | null>(null);
   const mapplsEnabled = isMapplsConfigured();
+
+  const availableStates = useMemo(() => {
+    const unique = new Set<string>();
+    for (const s of stations) {
+      if (s.state) unique.add(s.state);
+    }
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [stations]);
+
+  const effectiveState = selectedStation?.state ?? availableStates[0] ?? '';
+
+  const availableCities = useMemo(() => {
+    const unique = new Set<string>();
+    for (const s of stations) {
+      if (s.state === effectiveState && s.city) {
+        unique.add(s.city);
+      }
+    }
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [stations, effectiveState]);
+
+  const effectiveCity =
+    selectedStation?.state === effectiveState &&
+    selectedStation?.city &&
+    availableCities.includes(selectedStation.city)
+      ? selectedStation.city
+      : (availableCities[0] ?? '');
+
+  const availableStations = useMemo(() => {
+    return stations
+      .filter((s) => s.state === effectiveState && s.city === effectiveCity)
+      .sort((a, b) => a.stationName.localeCompare(b.stationName));
+  }, [stations, effectiveState, effectiveCity]);
+
+  const effectiveStationId =
+    selectedStation &&
+    selectedStation.state === effectiveState &&
+    selectedStation.city === effectiveCity
+      ? selectedStation.stationId
+      : (availableStations[0]?.stationId ?? '');
+
+  const handleStateChange = (nextState: string) => {
+    const stateStations = stations.filter((s) => s.state === nextState);
+    if (stateStations.length === 0) return;
+    const sortedCities = Array.from(new Set(stateStations.map((s) => s.city))).sort((a, b) =>
+      a.localeCompare(b)
+    );
+    const firstCity = sortedCities[0];
+    const cityStations = stateStations.filter((s) => s.city === firstCity);
+    const nextStation = cityStations.find((s) => s.aqi !== null) ?? cityStations[0];
+    if (nextStation) {
+      onSelectStation?.(nextStation);
+    }
+  };
+
+  const handleCityChange = (nextCity: string) => {
+    const cityStations = stations.filter(
+      (s) => s.state === effectiveState && s.city === nextCity
+    );
+    if (cityStations.length === 0) return;
+    const nextStation = cityStations.find((s) => s.aqi !== null) ?? cityStations[0];
+    if (nextStation) {
+      onSelectStation?.(nextStation);
+    }
+  };
+
+  const handleStationChange = (nextStationId: string) => {
+    const match = stations.find((s) => s.stationId === nextStationId);
+    if (match) {
+      onSelectStation?.(match);
+    }
+  };
+
+  const handleResetStation = () => {
+    const primary =
+      availableStations.find((s) => s.aqi !== null) ?? availableStations[0];
+    if (primary) {
+      onSelectStation?.(primary);
+    }
+  };
 
   useEffect(() => {
     onSelectStationRef.current = onSelectStation;
@@ -195,60 +274,6 @@ export function AQIMap({
       }
     },
     []
-  );
-
-  const requestUserLocation = useCallback(
-    (forceCenter = false) => {
-      if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
-        console.warn('[O2CITY GPS] navigator.geolocation unavailable; using Pune fallback:', PUNE_FALLBACK);
-        setIsLocatingUser(false);
-        return;
-      }
-
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          setIsLocatingUser(false);
-          const lat = Number(pos.coords.latitude);
-          const lng = Number(pos.coords.longitude);
-          const accuracy = pos.coords.accuracy;
-          console.log('[O2CITY GPS] Location acquired:', { lat, lng, accuracy });
-
-          if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-            console.warn('[O2CITY GPS] Non-finite coordinates received; using Pune fallback:', PUNE_FALLBACK);
-            return;
-          }
-
-          if (!forceCenter && hasSelectedStationRef.current) {
-            console.log('[O2CITY GPS] Skipping auto-center because a station is already selected.');
-            return;
-          }
-
-          if (mapReadyRef.current && mapInstanceRef.current) {
-            applyMapCenter(lat, lng, INITIAL_ZOOM, forceCenter ? 'my-location-button' : 'gps-init');
-          } else {
-            pendingGpsRef.current = { lat, lng };
-            console.log('[O2CITY GPS] Map not loaded yet; queued GPS center for load event:', { lat, lng });
-          }
-        },
-        (err) => {
-          setIsLocatingUser(false);
-          console.warn('[O2CITY GPS] Geolocation failed:', {
-            code: err.code,
-            message: err.message,
-            fallback: PUNE_FALLBACK,
-          });
-          if (forceCenter || (!hasSelectedStationRef.current && !mapReadyRef.current)) {
-            if (mapReadyRef.current && mapInstanceRef.current) {
-              applyMapCenter(PUNE_FALLBACK.lat, PUNE_FALLBACK.lng, INITIAL_ZOOM, `gps-error-${err.code}-pune-fallback`);
-            } else {
-              pendingGpsRef.current = { lat: PUNE_FALLBACK.lat, lng: PUNE_FALLBACK.lng };
-            }
-          }
-        },
-        GEOLOCATION_OPTIONS
-      );
-    },
-    [applyMapCenter]
   );
 
   // Clean and validate station coordinates + AQI once per stations fetch
@@ -562,36 +587,109 @@ export function AQIMap({
   return (
     <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-lg shadow-slate-900/5">
       {/* Map Header */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-white px-4 py-1.5">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-2 border-b border-slate-100 bg-white px-4 py-2 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex shrink-0 items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
           <span className="text-[11px] font-bold tracking-wider text-slate-900 uppercase">
             Live AQI Monitoring
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
-          <span className="font-medium text-slate-700">
-            {isLoading ? 'Loading stations...' : `${meta.totalStations} monitoring stations`}
-          </span>
-          <span>{formatRelativeTime(meta.lastUpdated)}</span>
-          {mapplsEnabled && (
-            <button
-              type="button"
-              onClick={() => {
-                setIsLocatingUser(true);
-                requestUserLocation(true);
-              }}
-              disabled={isLocatingUser}
-              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-60"
+        {/* Compact State / City / Station Dropdowns */}
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:flex lg:flex-1 lg:items-center lg:justify-end">
+          <div className="flex min-w-0 items-center gap-1.5 lg:w-48">
+            <label
+              htmlFor={`state-select-${containerId}`}
+              className="shrink-0 text-[11px] font-medium text-slate-600"
             >
-              <LocateFixed
-                className={`h-3 w-3 text-emerald-600 ${isLocatingUser ? 'animate-pulse' : ''}`}
-                aria-hidden="true"
-              />
-              <span>{isLocatingUser ? 'Locating...' : 'My location'}</span>
-            </button>
-          )}
+              State <span className="text-rose-500">*</span>
+            </label>
+            <select
+              id={`state-select-${containerId}`}
+              aria-label="Select state"
+              value={effectiveState}
+              disabled={isLoading || availableStates.length === 0}
+              onChange={(e) => handleStateChange(e.target.value)}
+              className="h-7 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-800 shadow-2xs transition-colors focus:border-emerald-500 focus:outline-none disabled:bg-slate-50 disabled:text-slate-400"
+            >
+              {availableStates.length === 0 ? (
+                <option value="">Loading...</option>
+              ) : (
+                availableStates.map((state) => (
+                  <option key={state} value={state}>
+                    {state}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+
+          <div className="flex min-w-0 items-center gap-1.5 lg:w-44">
+            <label
+              htmlFor={`city-select-${containerId}`}
+              className="shrink-0 text-[11px] font-medium text-slate-600"
+            >
+              City <span className="text-rose-500">*</span>
+            </label>
+            <select
+              id={`city-select-${containerId}`}
+              aria-label="Select city"
+              value={effectiveCity}
+              disabled={isLoading || availableCities.length === 0}
+              onChange={(e) => handleCityChange(e.target.value)}
+              className="h-7 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-800 shadow-2xs transition-colors focus:border-emerald-500 focus:outline-none disabled:bg-slate-50 disabled:text-slate-400"
+            >
+              {availableCities.length === 0 ? (
+                <option value="">Loading...</option>
+              ) : (
+                availableCities.map((city) => (
+                  <option key={city} value={city}>
+                    {city}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+
+          <div className="flex min-w-0 items-center gap-1.5 lg:w-64">
+            <label
+              htmlFor={`station-select-${containerId}`}
+              className="shrink-0 text-[11px] font-medium text-slate-600"
+            >
+              Station
+            </label>
+            <div className="relative flex min-w-0 flex-1 items-center">
+              <select
+                id={`station-select-${containerId}`}
+                aria-label="Select station"
+                value={effectiveStationId}
+                disabled={isLoading || availableStations.length === 0}
+                onChange={(e) => handleStationChange(e.target.value)}
+                className="h-7 w-full rounded-md border border-slate-200 bg-white pr-6 pl-2 text-[11px] font-medium text-slate-800 shadow-2xs transition-colors focus:border-emerald-500 focus:outline-none disabled:bg-slate-50 disabled:text-slate-400"
+              >
+                {availableStations.length === 0 ? (
+                  <option value="">Loading...</option>
+                ) : (
+                  availableStations.map((st) => (
+                    <option key={st.stationId} value={st.stationId}>
+                      {st.stationName}
+                    </option>
+                  ))
+                )}
+              </select>
+              {availableStations.length > 1 && effectiveStationId && (
+                <button
+                  type="button"
+                  onClick={handleResetStation}
+                  title="Reset to primary station"
+                  aria-label="Reset to primary station"
+                  className="absolute right-5 inline-flex h-4 w-4 items-center justify-center rounded text-slate-400 hover:text-slate-700"
+                >
+                  <X className="h-3 w-3" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
