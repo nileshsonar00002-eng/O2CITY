@@ -1,12 +1,14 @@
-import { ArrowUpRight, LocateFixed, Share2, Wind, Activity } from 'lucide-react';
+import { ArrowUpRight, CloudSun, LocateFixed, Share2, Wind, Activity } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useWeather } from '../../hooks/useWeather';
 import type { StationWithAQI } from '../../types/station';
 import {
   formatPollutantValue,
   formatRelativeTime,
   getAQIMetaByValue,
 } from '../../utils/aqi';
+import { CompactWeatherCard } from '../Weather/CompactWeatherCard';
 
 interface FloatingAQICardProps {
   station: StationWithAQI | null;
@@ -28,8 +30,18 @@ export function FloatingAQICard({
   isLocating = false,
   onUseMyLocation,
 }: FloatingAQICardProps) {
-  const [activeTab, setActiveTab] = useState<'aqi' | 'pollutants'>('aqi');
+  const [activeTab, setActiveTab] = useState<'aqi' | 'pollutants' | 'weather'>('aqi');
   const [copied, setCopied] = useState(false);
+
+  const {
+    weather,
+    isLoading: isWeatherLoading,
+    error: weatherError,
+  } = useWeather(
+    station?.latitude ?? null,
+    station?.longitude ?? null,
+    activeTab === 'weather'
+  );
 
   const meta = getAQIMetaByValue(station?.aqi ?? null);
   const aqiValue = station?.aqi ?? null;
@@ -81,6 +93,18 @@ export function FloatingAQICard({
         >
           <Activity className="h-3 w-3 text-amber-500" aria-hidden="true" />
           <span>Pollutants</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('weather')}
+          className={`inline-flex items-center gap-1 rounded-t-xl px-3 py-1 text-[11px] font-semibold transition-colors ${
+            activeTab === 'weather'
+              ? 'bg-white text-slate-900 shadow-sm'
+              : 'bg-white/80 text-slate-600 hover:bg-white/95'
+          }`}
+        >
+          <CloudSun className="h-3 w-3 text-sky-500" aria-hidden="true" />
+          <span>Weather</span>
         </button>
       </div>
 
@@ -303,7 +327,7 @@ export function FloatingAQICard({
                 </div>
               </div>
             </div>
-          ) : (
+          ) : activeTab === 'pollutants' ? (
             /* Pollutants Tab */
             <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
               {[
@@ -325,6 +349,14 @@ export function FloatingAQICard({
                 </div>
               ))}
             </div>
+          ) : (
+            /* Compact Weather Tab */
+            <CompactWeatherCard
+              weather={weather}
+              isLoading={isWeatherLoading}
+              error={weatherError}
+              hasStation={station !== null}
+            />
           )}
         </div>
       </div>
