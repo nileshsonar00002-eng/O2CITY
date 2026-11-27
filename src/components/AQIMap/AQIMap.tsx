@@ -1,5 +1,5 @@
-import { MapPin, RefreshCw } from 'lucide-react';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { LocateFixed, MapPin, RefreshCw, X } from 'lucide-react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { isMapplsConfigured } from '../../config/env';
 import {
   loadMapplsSDK,
@@ -24,12 +24,19 @@ interface AQIMapProps {
   selectedStation?: StationWithAQI | null;
   onSelectStation?: (station: StationWithAQI) => void;
   heightClass?: string;
+  showLegend?: boolean;
+  popupPosition?: 'marker' | 'top-center';
 }
 
 const PUNE_FALLBACK = { lat: 18.5204, lng: 73.8567 } as const;
 const NEARBY_RADIUS_KM = 50;
 const INITIAL_ZOOM = 11;
 const MOVE_DEBOUNCE_MS = 400;
+const GEOLOCATION_OPTIONS: PositionOptions = {
+  enableHighAccuracy: true,
+  timeout: 10000,
+  maximumAge: 0,
+};
 
 interface CleanStationPoint {
   station: StationWithAQI;
@@ -136,18 +143,26 @@ export function AQIMap({
   selectedStation,
   onSelectStation,
   heightClass = 'h-[380px] sm:h-[440px]',
+  showLegend = true,
+  popupPosition = 'marker',
 }: AQIMapProps) {
   const containerId = useId().replace(/:/g, '');
   const mapContainerId = `mappls-${containerId}`;
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<MapplsMapInstance | null>(null);
+  const mapReadyRef = useRef(false);
+  const pendingGpsRef = useRef<{ lat: number; lng: number } | null>(null);
   const markersRef = useRef<MapplsMarkerInstance[]>([]);
   const selectedMarkerRef = useRef<MapplsMarkerInstance | null>(null);
   const onSelectStationRef = useRef(onSelectStation);
+  const clickedFromMapRef = useRef<string | null>(null);
+  const selectedStationIdRef = useRef<string | null>(selectedStation?.stationId ?? null);
   const hasSelectedStationRef = useRef(Boolean(selectedStation));
   const [activeCenter, setActiveCenter] = useState<{ lat: number; lng: number }>(PUNE_FALLBACK);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [isLocatingUser, setIsLocatingUser] = useState(false);
+  const [activePopupStation, setActivePopupStation] = useState<StationWithAQI | null>(null);
   const mapplsEnabled = isMapplsConfigured();
 
   useEffect(() => {
@@ -156,7 +171,85 @@ export function AQIMap({
 
   useEffect(() => {
     hasSelectedStationRef.current = Boolean(selectedStation);
+    selectedStationIdRef.current = selectedStation?.stationId ?? null;
   }, [selectedStation]);
+
+  const applyMapCenter = useCallback(
+    (lat: number, lng: number, zoom: number, reason: string) => {
+      const cleanLat = Number(lat);
+      const cleanLng = Number(lng);
+      if (!Number.isFinite(cleanLat) || !Number.isFinite(cleanLng)) return;
+
+      console.log(`[O2CITY Map] Center changed (${reason}):`, {
+        lat: cleanLat,
+        lng: cleanLng,
+        zoom,
+      });
+
+      setActiveCenter({ lat: cleanLat, lng: cleanLng });
+
+      const map = mapInstanceRef.current;
+      if (map && mapReadyRef.current) {
+        map.setCenter({ lat: cleanLat, lng: cleanLng });
+        map.setZoom(zoom);
+      }
+    },
+    []
+  );
+
+  const requestUserLocation = useCallback(
+    (forceCenter = false) => {
+      if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+        console.warn('[O2CITY GPS] navigator.geolocation unavailable; using Pune fallback:', PUNE_FALLBACK);
+        setIsLocatingUser(false);
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setIsLocatingUser(false);
+          const lat = Number(pos.coords.latitude);
+          const lng = Number(pos.coords.longitude);
+          const accuracy = pos.coords.accuracy;
+          console.log('[O2CITY GPS] Location acquired:', { lat, lng, accuracy });
+
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            console.warn('[O2CITY GPS] Non-finite coordinates received; using Pune fallback:', PUNE_FALLBACK);
+            return;
+          }
+
+          if (!forceCenter && hasSelectedStationRef.current) {
+            console.log('[O2CITY GPS] Skipping auto-center because a station is already selected.');
+            return;
+          }
+
+          if (mapReadyRef.current && mapInstanceRef.current) {
+            applyMapCenter(lat, lng, INITIAL_ZOOM, forceCenter ? 'my-location-button' : 'gps-init');
+          } else {
+            pendingGpsRef.current = { lat, lng };
+            console.log('[O2CITY GPS] Map not loaded yet; queued GPS center for load event:', { lat, lng });
+          }
+        },
+        (err) => {
+          setIsLocatingUser(false);
+          console.warn('[O2CITY GPS] Geolocation failed:', {
+            code: err.code,
+            message: err.message,
+            fallback: PUNE_FALLBACK,
+          });
+          if (forceCenter || (!hasSelectedStationRef.current && !mapReadyRef.current)) {
+            if (mapReadyRef.current && mapInstanceRef.current) {
+              applyMapCenter(PUNE_FALLBACK.lat, PUNE_FALLBACK.lng, INITIAL_ZOOM, `gps-error-${err.code}-pune-fallback`);
+            } else {
+              pendingGpsRef.current = { lat: PUNE_FALLBACK.lat, lng: PUNE_FALLBACK.lng };
+            }
+          }
+        },
+        GEOLOCATION_OPTIONS
+      );
+    },
+    [applyMapCenter]
+  );
 
   // Clean and validate station coordinates + AQI once per stations fetch
   const cleanedStations = useMemo<CleanStationPoint[]>(() => {
@@ -196,25 +289,37 @@ export function AQIMap({
     let cancelled = false;
     let debounceTimer: number | undefined;
 
-    if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+      console.warn('[O2CITY GPS] navigator.geolocation unavailable; using Pune fallback:', PUNE_FALLBACK);
+    } else {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          if (cancelled || hasSelectedStationRef.current) return;
+          if (cancelled) return;
           const lat = Number(pos.coords.latitude);
           const lng = Number(pos.coords.longitude);
-          if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-
-          setActiveCenter({ lat, lng });
-          const map = mapInstanceRef.current;
-          if (map) {
-            map.setCenter([lat, lng]);
-            map.setZoom(INITIAL_ZOOM);
+          console.log('[O2CITY GPS] Initial location acquired:', {
+            lat,
+            lng,
+            accuracy: pos.coords.accuracy,
+          });
+          if (!Number.isFinite(lat) || !Number.isFinite(lng) || hasSelectedStationRef.current) {
+            return;
+          }
+          if (mapReadyRef.current && mapInstanceRef.current) {
+            applyMapCenter(lat, lng, INITIAL_ZOOM, 'gps-init');
+          } else {
+            pendingGpsRef.current = { lat, lng };
+            console.log('[O2CITY GPS] Map not loaded yet; queued GPS center for load event:', { lat, lng });
           }
         },
-        () => {
-          // Permission denied or unavailable -> keep Pune fallback center
+        (err) => {
+          console.warn('[O2CITY GPS] Initial geolocation failed:', {
+            code: err.code,
+            message: err.message,
+            fallback: PUNE_FALLBACK,
+          });
         },
-        { enableHighAccuracy: false, timeout: 6000, maximumAge: 300000 }
+        GEOLOCATION_OPTIONS
       );
     }
 
@@ -233,8 +338,16 @@ export function AQIMap({
         mapInstanceRef.current = map;
 
         const markReady = () => {
-          if (!cancelled) {
-            setMapReady(true);
+          if (cancelled || mapReadyRef.current) return;
+          mapReadyRef.current = true;
+          setMapReady(true);
+
+          if (pendingGpsRef.current && !hasSelectedStationRef.current) {
+            const pending = pendingGpsRef.current;
+            pendingGpsRef.current = null;
+            applyMapCenter(pending.lat, pending.lng, INITIAL_ZOOM, 'pending-gps-after-load');
+          } else {
+            console.log('[O2CITY Map] Map loaded at initial center:', PUNE_FALLBACK);
           }
         };
 
@@ -259,7 +372,11 @@ export function AQIMap({
               const movedEnough =
                 Math.abs(prev.lat - nextCenter.lat) > 0.001 ||
                 Math.abs(prev.lng - nextCenter.lng) > 0.001;
-              return movedEnough ? nextCenter : prev;
+              if (movedEnough) {
+                console.log('[O2CITY Map] Center changed (user pan/zoom):', nextCenter);
+                return nextCenter;
+              }
+              return prev;
             });
           }, MOVE_DEBOUNCE_MS);
         };
@@ -315,9 +432,10 @@ export function AQIMap({
         // Ignore cleanup errors
       }
       mapInstanceRef.current = null;
+      mapReadyRef.current = false;
       setMapReady(false);
     };
-  }, [mapplsEnabled, mapContainerId]);
+  }, [mapplsEnabled, mapContainerId, applyMapCenter]);
 
   // Render individual round AQI markers for stations within 50 km (no count clusters)
   useEffect(() => {
@@ -337,7 +455,8 @@ export function AQIMap({
       const bgColor = getMarkerColor(aqi);
       const size = 32;
 
-      const markerHtml = `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${bgColor};border:2px solid #ffffff;box-shadow:0 2px 6px rgba(15,23,42,0.32);display:flex;align-items:center;justify-content:center;color:#ffffff;font-weight:700;font-size:11px;font-family:Inter,system-ui,sans-serif;line-height:1;cursor:pointer;">${aqi}</div>`;
+      const isSelectedMarker = selectedStationIdRef.current === station.stationId;
+      const markerHtml = `<div data-o2-station-id="${escapeHtml(station.stationId)}" class="${isSelectedMarker ? 'o2-marker-blink' : ''}" style="width:${size}px;height:${size}px;border-radius:9999px;background:${bgColor};border:2px solid #ffffff;box-shadow:0 2px 6px rgba(15,23,42,0.32);display:flex;align-items:center;justify-content:center;color:#ffffff;font-weight:700;font-size:11px;font-family:Inter,system-ui,sans-serif;line-height:1;cursor:pointer;">${aqi}</div>`;
 
       const marker = new mappls.Marker({
         map,
@@ -345,24 +464,37 @@ export function AQIMap({
         html: markerHtml,
         width: size,
         height: size,
-        popupHtml: buildPopupHtml(station),
+        popupHtml: popupPosition === 'marker' ? buildPopupHtml(station) : undefined,
+        fitbounds: false,
       });
 
       if (marker.addListener) {
-        marker.addListener('click', () => onSelectStationRef.current?.(station));
+        marker.addListener('click', () => {
+          clickedFromMapRef.current = station.stationId;
+          if (popupPosition === 'top-center') {
+            setActivePopupStation(station);
+          }
+          onSelectStationRef.current?.(station);
+        });
       }
 
       createdMarkers.push(marker);
     }
 
     markersRef.current = createdMarkers;
-  }, [mapReady, nearbyStations]);
+  }, [mapReady, nearbyStations, popupPosition]);
 
-  // Highlight selected station and pan smoothly
+  // Highlight selected station and pan smoothly when selected from outside the map
   useEffect(() => {
     const map = mapInstanceRef.current;
     const mappls = window.mappls;
     if (!mapReady || !map || !mappls) return;
+
+    if (selectedStation && clickedFromMapRef.current === selectedStation.stationId) {
+      // Marker was clicked directly on the map: keep its open popup intact without panning/rebuilding
+      clickedFromMapRef.current = null;
+      return;
+    }
 
     removeMarkerInstance(mappls, map, selectedMarkerRef.current);
     selectedMarkerRef.current = null;
@@ -379,7 +511,7 @@ export function AQIMap({
     const bgColor = roundedAqi !== null ? getMarkerColor(roundedAqi) : '#64748b';
     const label = roundedAqi !== null ? String(roundedAqi) : '—';
     const size = 36;
-    const highlightHtml = `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${bgColor};border:3px solid #0f172a;box-shadow:0 0 0 3px #ffffff,0 4px 10px rgba(15,23,42,0.4);display:flex;align-items:center;justify-content:center;color:#ffffff;font-weight:800;font-size:12px;font-family:Inter,system-ui,sans-serif;line-height:1;cursor:pointer;">${label}</div>`;
+    const highlightHtml = `<div data-o2-station-id="${escapeHtml(selectedStation.stationId)}" class="o2-marker-blink" style="width:${size}px;height:${size}px;border-radius:9999px;background:${bgColor};border:3px solid #0f172a;box-shadow:0 0 0 3px #ffffff,0 4px 10px rgba(15,23,42,0.4);display:flex;align-items:center;justify-content:center;color:#ffffff;font-weight:800;font-size:12px;font-family:Inter,system-ui,sans-serif;line-height:1;cursor:pointer;">${label}</div>`;
 
     const highlightMarker = new mappls.Marker({
       map,
@@ -387,35 +519,79 @@ export function AQIMap({
       html: highlightHtml,
       width: size,
       height: size,
-      popupHtml: buildPopupHtml(selectedStation),
+      popupHtml: popupPosition === 'marker' ? buildPopupHtml(selectedStation) : undefined,
+      fitbounds: false,
     });
 
     if (highlightMarker.addListener) {
-      highlightMarker.addListener('click', () => onSelectStationRef.current?.(selectedStation));
+      highlightMarker.addListener('click', () => {
+        if (popupPosition === 'top-center') {
+          setActivePopupStation(selectedStation);
+        }
+        onSelectStationRef.current?.(selectedStation);
+      });
     }
 
     selectedMarkerRef.current = highlightMarker;
 
-    map.setCenter([lat, lng]);
+    console.log('[O2CITY Map] Center changed (selectedStation):', {
+      lat,
+      lng,
+      stationName: selectedStation.stationName,
+    });
+    map.setCenter({ lat, lng });
     map.setZoom(INITIAL_ZOOM);
-  }, [mapReady, selectedStation]);
+  }, [mapReady, selectedStation, popupPosition]);
+
+  // Sync blinking indicator on the map marker whose data is currently shown in the card
+  useEffect(() => {
+    const container = mapContainerRef.current;
+    if (!mapReady || !container) return;
+
+    const targetId = selectedStation?.stationId ?? null;
+    const nodes = container.querySelectorAll<HTMLElement>('[data-o2-station-id]');
+    nodes.forEach((el) => {
+      if (targetId && el.dataset.o2StationId === targetId) {
+        el.classList.add('o2-marker-blink');
+      } else {
+        el.classList.remove('o2-marker-blink');
+      }
+    });
+  }, [mapReady, nearbyStations, selectedStation]);
 
   return (
     <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-lg shadow-slate-900/5">
       {/* Map Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-5 py-3.5">
-        <div className="flex items-center gap-2.5">
-          <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" aria-hidden="true" />
-          <span className="text-xs font-bold tracking-wider text-slate-900 uppercase">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-white px-4 py-1.5">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
+          <span className="text-[11px] font-bold tracking-wider text-slate-900 uppercase">
             Live AQI Monitoring
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
           <span className="font-medium text-slate-700">
             {isLoading ? 'Loading stations...' : `${meta.totalStations} monitoring stations`}
           </span>
           <span>{formatRelativeTime(meta.lastUpdated)}</span>
+          {mapplsEnabled && (
+            <button
+              type="button"
+              onClick={() => {
+                setIsLocatingUser(true);
+                requestUserLocation(true);
+              }}
+              disabled={isLocatingUser}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-60"
+            >
+              <LocateFixed
+                className={`h-3 w-3 text-emerald-600 ${isLocatingUser ? 'animate-pulse' : ''}`}
+                aria-hidden="true"
+              />
+              <span>{isLocatingUser ? 'Locating...' : 'My location'}</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -429,6 +605,58 @@ export function AQIMap({
               className="h-full w-full"
               aria-label="India AQI monitoring stations map"
             />
+            {popupPosition === 'top-center' && activePopupStation && (() => {
+              const popupMeta = getAQIMetaByValue(activePopupStation.aqi);
+              const aqiText =
+                activePopupStation.aqi !== null ? String(activePopupStation.aqi) : '—';
+              const catText =
+                activePopupStation.aqi !== null ? popupMeta.category : 'Unavailable';
+              return (
+                <div
+                  role="dialog"
+                  aria-label={`${activePopupStation.stationName} AQI details`}
+                  className="absolute top-2.5 left-1/2 z-30 w-[min(92%,260px)] -translate-x-1/2 rounded-2xl border border-slate-200/90 bg-white/95 p-3 shadow-lg shadow-slate-900/15 backdrop-blur-sm"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setActivePopupStation(null)}
+                    aria-label="Close station card"
+                    className="absolute top-2 right-2 rounded-full p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                  <div className="pr-6 text-xs font-bold leading-snug text-slate-900">
+                    {activePopupStation.stationName}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">
+                    {activePopupStation.city}, {activePopupStation.state}
+                  </div>
+                  <div className="mt-2 flex items-center gap-2 rounded-lg bg-slate-50 px-2.5 py-1.5">
+                    <span
+                      className="font-mono text-base font-bold"
+                      style={{ color: popupMeta.colorHex }}
+                    >
+                      AQI {aqiText}
+                    </span>
+                    <span className="text-xs font-semibold text-slate-700">{catText}</span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-[11px] text-slate-600">
+                    <span>
+                      PM2.5:{' '}
+                      <strong className="text-slate-900">
+                        {formatPollutantValue(activePopupStation.pollutants.pm25)}
+                      </strong>
+                    </span>
+                    <span>
+                      PM10:{' '}
+                      <strong className="text-slate-900">
+                        {formatPollutantValue(activePopupStation.pollutants.pm10)}
+                      </strong>
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
             {(!mapReady || isLoading) && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-50/75 backdrop-blur-[1px]">
                 <div className="flex items-center gap-2.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 shadow-sm">
@@ -456,22 +684,24 @@ export function AQIMap({
       </div>
 
       {/* AQI Legend */}
-      <div className="border-t border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <ul className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs font-medium text-slate-700">
-            {AQI_CATEGORIES.map((item) => (
-              <li key={item.category} className="inline-flex items-center gap-1.5">
-                <span
-                  className="h-2.5 w-2.5 rounded-full"
-                  style={{ backgroundColor: item.colorHex }}
-                  aria-hidden="true"
-                />
-                <span>{item.category}</span>
-              </li>
-            ))}
-          </ul>
+      {showLegend && (
+        <div className="border-t border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <ul className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs font-medium text-slate-700">
+              {AQI_CATEGORIES.map((item) => (
+                <li key={item.category} className="inline-flex items-center gap-1.5">
+                  <span
+                    className="h-2.5 w-2.5 rounded-full"
+                    style={{ backgroundColor: item.colorHex }}
+                    aria-hidden="true"
+                  />
+                  <span>{item.category}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

@@ -151,3 +151,27 @@
     }
   }
 }
+
+/* Active station marker blink on map */
+@keyframes o2MarkerBlink {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow:
+      0 0 0 2px #0f172a,
+      0 0 0 4px rgba(255, 255, 255, 0.95),
+      0 0 0 4px rgba(16, 185, 129, 0.65);
+  }
+  50% {
+    transform: scale(1.18);
+    box-shadow:
+      0 0 0 2px #0f172a,
+      0 0 0 4px rgba(255, 255, 255, 0.95),
+      0 0 0 12px rgba(16, 185, 129, 0);
+  }
+}
+
+.o2-marker-blink {
+  animation: o2MarkerBlink 1.3s ease-in-out infinite;
+  z-index: 10;
+}

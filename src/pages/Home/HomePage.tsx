@@ -1,5 +1,5 @@
 import { AlertCircle } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Hero } from '../../components/Hero/Hero';
 import { PersonalSection } from '../../components/Hero/PersonalSection';
 import { TrustStrip } from '../../components/Hero/TrustStrip';
@@ -25,33 +25,34 @@ export function HomePage({
   const { status: locationStatus, nearest, message, detectLocation, resetLocation } =
     useLocation();
   const [manualStation, setManualStation] = useState<StationWithAQI | null>(null);
-  const [selectionSubtitle, setSelectionSubtitle] = useState<string | null>(null);
+
+  const defaultStation = useMemo(() => {
+    if (stations.length === 0) return null;
+    const pune = cities.find((c) => c.city.toLowerCase() === 'pune');
+    if (pune?.primaryStation) return pune.primaryStation;
+    return stations.find((s) => s.aqi !== null) ?? stations[0] ?? null;
+  }, [cities, stations]);
 
   const activeStation =
-    locationStatus === 'found' && nearest ? nearest.station : manualStation;
+    locationStatus === 'found' && nearest
+      ? nearest.station
+      : (manualStation ?? defaultStation);
   const activeDistance =
     locationStatus === 'found' && nearest ? nearest.distanceKm : null;
-  const activeSubtitle =
-    locationStatus === 'found' && nearest
-      ? 'Nearest Monitoring Station'
-      : selectionSubtitle;
 
   const handleUseMyLocation = () => {
     setManualStation(null);
-    setSelectionSubtitle(null);
     detectLocation(stations);
   };
 
   const handleSelectCity = (city: CitySummary) => {
     resetLocation();
     setManualStation(city.primaryStation);
-    setSelectionSubtitle(`Selected City • ${city.stationCount} station${city.stationCount === 1 ? '' : 's'}`);
   };
 
   const handleSelectStation = (station: StationWithAQI) => {
     resetLocation();
     setManualStation(station);
-    setSelectionSubtitle('Selected Monitoring Station');
   };
 
   return (
@@ -75,7 +76,6 @@ export function HomePage({
         locationMessage={message}
         selectedStation={activeStation}
         distanceKm={activeDistance}
-        selectionSubtitle={activeSubtitle}
         onUseMyLocation={handleUseMyLocation}
         onSelectCity={handleSelectCity}
         onSelectStation={handleSelectStation}
