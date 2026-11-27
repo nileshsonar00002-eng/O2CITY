@@ -1,10 +1,42 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import type { Firestore } from 'firebase-admin/firestore';
-import { CPCBError, fetchCPCBData, type NormalizedAQI, type NormalizedStation } from './cpcb.js';
-import { getFirebaseAdminDb } from './firebaseAdmin.js';
-import { FirestoreIngestError, persistIngestedData } from './ingestService.js';
+import {
+  CPCBError,
+  fetchCPCBData,
+  type AQICategory,
+  type NormalizedAQI,
+  type NormalizedStation,
+} from './cpcb.js';
+import { DatabaseIngestError, persistIngestedData } from './ingestService.js';
+import { getSupabaseAdminClient } from './supabaseAdmin.js';
 
 const STALE_THRESHOLD_MS = 65 * 60_000;
+
+interface StationRow {
+  station_id: string;
+  station_name: string;
+  city: string;
+  state: string;
+  latitude: number;
+  longitude: number;
+  active: boolean;
+  source: string;
+}
+
+interface AqiLatestRow {
+  station_id: string;
+  aqi: number | null;
+  aqi_category: string;
+  pm25: number | null;
+  pm10: number | null;
+  no2: number | null;
+  so2: number | null;
+  co: number | null;
+  o3: number | null;
+  nh3: number | null;
+  source_timestamp: string | null;
+  fetched_at: string;
+  data_status: 'live' | 'delayed' | 'unavailable';
+}
 
 function logSafeStationsError(
   stage: string,
@@ -24,16 +56,47 @@ function logSafeStationsError(
   );
 }
 
-function extractFirestoreCode(err: unknown): string {
-  if (err && typeof err === 'object' && 'code' in err) {
+function extractErrorCode(err: unknown): string {
+  if (err && typeof err === 'object' && 'code' in err && (err as { code: unknown }).code) {
     return String((err as { code: unknown }).code);
   }
   if (err instanceof Error) {
-    return err.message === 'FIREBASE_PRIVATE_KEY_INVALID_FORMAT'
-      ? 'FIREBASE_PRIVATE_KEY_INVALID_FORMAT'
-      : err.name;
+    return err.name;
   }
   return 'UNKNOWN';
+}
+
+function mapStationRow(row: StationRow): NormalizedStation {
+  return {
+    stationId: row.station_id,
+    stationName: row.station_name,
+    city: row.city,
+    state: row.state,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    active: row.active,
+    source: row.source,
+  };
+}
+
+function mapLatestRow(row: AqiLatestRow): NormalizedAQI {
+  return {
+    stationId: row.station_id,
+    aqi: row.aqi,
+    aqiCategory: row.aqi_category as AQICategory,
+    pollutants: {
+      pm25: row.pm25,
+      pm10: row.pm10,
+      no2: row.no2,
+      so2: row.so2,
+      co: row.co,
+      o3: row.o3,
+      nh3: row.nh3,
+    },
+    sourceTimestamp: row.source_timestamp,
+    fetchedAt: row.fetched_at,
+    dataStatus: row.data_status,
+  };
 }
 
 export async function handleLatestStations(req: VercelRequest, res: VercelResponse) {
@@ -46,15 +109,17 @@ export async function handleLatestStations(req: VercelRequest, res: VercelRespon
 
   res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
 
-  let db: Firestore | null = null;
-  try {
-    db = getFirebaseAdminDb();
-  } catch (err) {
-    const code = extractFirestoreCode(err);
-    logSafeStationsError('FIREBASE_INIT', code, 'Firebase Admin initialization failed', Date.now() - startedAt);
+  const supabase = getSupabaseAdminClient();
+  if (!supabase) {
+    logSafeStationsError(
+      'SUPABASE_INIT',
+      'SUPABASE_NOT_CONFIGURED',
+      'Supabase server credentials missing',
+      Date.now() - startedAt
+    );
     res.status(500).json({
-      stage: 'FIREBASE_INIT',
-      code,
+      stage: 'SUPABASE_INIT',
+      code: 'SUPABASE_NOT_CONFIGURED',
       error: 'Unable to initialize air-quality database connection.',
     });
     return;
@@ -64,31 +129,45 @@ export async function handleLatestStations(req: VercelRequest, res: VercelRespon
   let readingsMap = new Map<string, NormalizedAQI>();
   let latestFetchedAt: string | null = null;
 
-  if (db) {
-    try {
-      const [stationSnap, latestSnap] = await Promise.all([
-        db.collection('stations').where('active', '==', true).get(),
-        db.collection('aqi_latest').get(),
-      ]);
+  try {
+    const [stationsResult, latestResult] = await Promise.all([
+      supabase
+        .from('stations')
+        .select('station_id, station_name, city, state, latitude, longitude, active, source')
+        .eq('active', true)
+        .limit(2000),
+      supabase
+        .from('aqi_latest')
+        .select(
+          'station_id, aqi, aqi_category, pm25, pm10, no2, so2, co, o3, nh3, source_timestamp, fetched_at, data_status'
+        )
+        .limit(2000),
+    ]);
 
-      stations = stationSnap.docs.map((doc) => doc.data() as NormalizedStation);
-      for (const doc of latestSnap.docs) {
-        const data = doc.data() as NormalizedAQI;
-        readingsMap.set(data.stationId, data);
-        if (!latestFetchedAt || (data.fetchedAt && data.fetchedAt > latestFetchedAt)) {
-          latestFetchedAt = data.fetchedAt;
-        }
-      }
-    } catch (err) {
-      const code = extractFirestoreCode(err);
-      logSafeStationsError('FIRESTORE_READ', code, 'Firestore read failed', Date.now() - startedAt);
-      res.status(500).json({
-        stage: 'FIRESTORE_READ',
-        code,
-        error: 'Unable to read air-quality data from database.',
-      });
-      return;
+    if (stationsResult.error) {
+      throw stationsResult.error;
     }
+    if (latestResult.error) {
+      throw latestResult.error;
+    }
+
+    stations = ((stationsResult.data ?? []) as StationRow[]).map(mapStationRow);
+    for (const row of (latestResult.data ?? []) as AqiLatestRow[]) {
+      const reading = mapLatestRow(row);
+      readingsMap.set(reading.stationId, reading);
+      if (!latestFetchedAt || (reading.fetchedAt && reading.fetchedAt > latestFetchedAt)) {
+        latestFetchedAt = reading.fetchedAt;
+      }
+    }
+  } catch (err) {
+    const code = extractErrorCode(err);
+    logSafeStationsError('SUPABASE_READ', code, 'Supabase read failed', Date.now() - startedAt);
+    res.status(500).json({
+      stage: 'SUPABASE_READ',
+      code,
+      error: 'Unable to read air-quality data from database.',
+    });
+    return;
   }
 
   const isStale =
@@ -103,17 +182,15 @@ export async function handleLatestStations(req: VercelRequest, res: VercelRespon
         stations = fresh.stations;
         readingsMap = new Map(fresh.readings.map((r) => [r.stationId, r]));
         latestFetchedAt = fresh.readings[0]?.fetchedAt ?? new Date().toISOString();
-        if (db) {
-          await persistIngestedData(fresh.stations, fresh.readings, fresh.skippedCount);
-        }
+        await persistIngestedData(fresh.stations, fresh.readings, fresh.skippedCount);
       }
     } catch (err) {
       const code =
-        err instanceof CPCBError || err instanceof FirestoreIngestError
+        err instanceof CPCBError || err instanceof DatabaseIngestError
           ? err.code
-          : extractFirestoreCode(err);
+          : extractErrorCode(err);
       logSafeStationsError(
-        err instanceof FirestoreIngestError ? 'FIRESTORE_WRITE' : 'CPCB_FETCH',
+        err instanceof DatabaseIngestError ? 'SUPABASE_WRITE' : 'CPCB_FETCH',
         code,
         'Background refresh failed; falling back to cached stations if available',
         Date.now() - startedAt

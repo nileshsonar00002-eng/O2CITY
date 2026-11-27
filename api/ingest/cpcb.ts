@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { CPCBError, fetchCPCBData } from '../_lib/cpcb.js';
-import { isFirebaseAdminConfigured } from '../_lib/firebaseAdmin.js';
-import { FirestoreIngestError, persistIngestedData } from '../_lib/ingestService.js';
+import { DatabaseIngestError, persistIngestedData } from '../_lib/ingestService.js';
+import { isSupabaseConfigured } from '../_lib/supabaseAdmin.js';
 
 function isAuthorizedIngestion(req: VercelRequest): boolean {
   const expectedSecret =
@@ -42,12 +42,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  if (!isFirebaseAdminConfigured()) {
-    logSafeError('CONFIG', 'FIREBASE_ENV_MISSING', 'Firebase Admin env vars missing', Date.now() - startedAt);
+  if (!isSupabaseConfigured()) {
+    logSafeError('CONFIG', 'SUPABASE_ENV_MISSING', 'Supabase server env vars missing', Date.now() - startedAt);
     res.status(503).json({
       success: false,
       stage: 'CONFIG',
-      code: 'FIREBASE_ENV_MISSING',
+      code: 'SUPABASE_ENV_MISSING',
       error: 'Server database credentials are not configured',
     });
     return;
@@ -82,11 +82,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
-    if (err instanceof FirestoreIngestError) {
-      logSafeError('FIRESTORE_WRITE', err.code, err.message, durationMs);
+    if (err instanceof DatabaseIngestError) {
+      logSafeError('SUPABASE_WRITE', err.code, err.message, durationMs);
       res.status(500).json({
         success: false,
-        stage: 'FIRESTORE_WRITE',
+        stage: 'SUPABASE_WRITE',
         code: err.code,
         error: err.message,
       });

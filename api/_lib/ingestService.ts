@@ -1,6 +1,5 @@
-import type { Firestore } from 'firebase-admin/firestore';
 import type { NormalizedAQI, NormalizedStation } from './cpcb.js';
-import { getFirebaseAdminDb } from './firebaseAdmin.js';
+import { getSupabaseAdminClient } from './supabaseAdmin.js';
 
 export interface IngestSummary {
   success: boolean;
@@ -10,100 +9,212 @@ export interface IngestSummary {
   timestamp: string;
 }
 
-export class FirestoreIngestError extends Error {
+export class DatabaseIngestError extends Error {
   readonly code: string;
 
   constructor(code: string, message: string) {
     super(message);
-    this.name = 'FirestoreIngestError';
+    this.name = 'DatabaseIngestError';
     this.code = code;
   }
 }
 
+interface StationUpsertRow {
+  station_id: string;
+  station_name: string;
+  city: string;
+  state: string;
+  latitude: number;
+  longitude: number;
+  active: boolean;
+  source: string;
+  updated_at: string;
+}
+
+interface AqiLatestUpsertRow {
+  station_id: string;
+  aqi: number | null;
+  aqi_category: string;
+  pm25: number | null;
+  pm10: number | null;
+  no2: number | null;
+  so2: number | null;
+  co: number | null;
+  o3: number | null;
+  nh3: number | null;
+  source_timestamp: string | null;
+  fetched_at: string;
+  data_status: 'live' | 'delayed' | 'unavailable';
+  updated_at: string;
+}
+
+interface AqiHistoryUpsertRow {
+  station_id: string;
+  bucket_at: string;
+  aqi: number | null;
+  aqi_category: string;
+  pm25: number | null;
+  pm10: number | null;
+  no2: number | null;
+  so2: number | null;
+  co: number | null;
+  o3: number | null;
+  nh3: number | null;
+  source_timestamp: string | null;
+  fetched_at: string;
+}
+
+const CHUNK_SIZE = 200;
+
 /**
- * Idempotently writes normalized stations, latest readings, and deterministic history snapshots
- * to Cloud Firestore via Firebase Admin SDK using parallel batch commits.
+ * Converts an ingestion fetchedAt timestamp to UTC and truncates it
+ * to the beginning of its UTC hour (YYYY-MM-DDTHH:00:00.000Z).
+ */
+export function computeUtcHourBucket(fetchedAt: string): string {
+  const ms = Date.parse(fetchedAt);
+  if (!Number.isFinite(ms)) {
+    throw new DatabaseIngestError(
+      'INVALID_FETCHED_AT',
+      'Invalid fetchedAt timestamp for UTC hourly bucket calculation'
+    );
+  }
+  const hourStartMs = Math.floor(ms / 3_600_000) * 3_600_000;
+  return new Date(hourStartMs).toISOString();
+}
+
+function formatSupabaseErrorDetail(err: { code?: string; message?: string }): string {
+  return err.code ? `${err.code}: ${err.message ?? 'Unknown error'}` : err.message ?? 'Unknown error';
+}
+
+/**
+ * Idempotently upserts normalized stations, latest AQI readings, and 1-hour UTC
+ * history snapshots into Supabase PostgreSQL in strict sequential order:
+ * 1) stations -> 2) aqi_latest -> 3) aqi_history.
  */
 export async function persistIngestedData(
   stations: readonly NormalizedStation[],
   readings: readonly NormalizedAQI[],
   skippedCount: number
 ): Promise<IngestSummary> {
-  let db: Firestore | null;
-  try {
-    db = getFirebaseAdminDb();
-  } catch (err) {
-    const code =
-      err instanceof Error && err.message === 'FIREBASE_PRIVATE_KEY_INVALID_FORMAT'
-        ? 'FIREBASE_PRIVATE_KEY_INVALID_FORMAT'
-        : 'FIREBASE_INIT_FAILED';
-    throw new FirestoreIngestError(code, 'Failed to initialize Firebase Admin SDK');
-  }
-
-  if (!db) {
-    throw new FirestoreIngestError(
-      'FIREBASE_NOT_CONFIGURED',
-      'Firebase Admin SDK credentials are missing'
+  const supabase = getSupabaseAdminClient();
+  if (!supabase) {
+    throw new DatabaseIngestError(
+      'SUPABASE_NOT_CONFIGURED',
+      'Supabase server credentials (SUPABASE_URL / SUPABASE_SECRET_KEY) are missing'
     );
   }
 
-  const CHUNK_SIZE = 150;
-  let updated = 0;
-  const commitPromises: Promise<unknown>[] = [];
+  const nowIso = new Date().toISOString();
 
-  for (let i = 0; i < stations.length; i += CHUNK_SIZE) {
-    const batch = db.batch();
-    const stationSlice = stations.slice(i, i + CHUNK_SIZE);
-    const readingSlice = readings.slice(i, i + CHUNK_SIZE);
+  const stationMap = new Map<string, StationUpsertRow>();
+  for (const s of stations) {
+    stationMap.set(s.stationId, {
+      station_id: s.stationId,
+      station_name: s.stationName,
+      city: s.city,
+      state: s.state,
+      latitude: s.latitude,
+      longitude: s.longitude,
+      active: s.active,
+      source: s.source,
+      updated_at: nowIso,
+    });
+  }
+  const stationRows = Array.from(stationMap.values());
 
-    for (const s of stationSlice) {
-      batch.set(db.collection('stations').doc(s.stationId), s, { merge: true });
+  const latestMap = new Map<string, AqiLatestUpsertRow>();
+  const historyMap = new Map<string, AqiHistoryUpsertRow>();
+
+  for (const r of readings) {
+    latestMap.set(r.stationId, {
+      station_id: r.stationId,
+      aqi: r.aqi,
+      aqi_category: r.aqiCategory,
+      pm25: r.pollutants.pm25,
+      pm10: r.pollutants.pm10,
+      no2: r.pollutants.no2,
+      so2: r.pollutants.so2,
+      co: r.pollutants.co,
+      o3: r.pollutants.o3,
+      nh3: r.pollutants.nh3,
+      source_timestamp: r.sourceTimestamp,
+      fetched_at: r.fetchedAt,
+      data_status: r.dataStatus,
+      updated_at: nowIso,
+    });
+
+    if (r.aqi !== null) {
+      const bucketAt = computeUtcHourBucket(r.fetchedAt);
+      historyMap.set(`${r.stationId}__${bucketAt}`, {
+        station_id: r.stationId,
+        bucket_at: bucketAt,
+        aqi: r.aqi,
+        aqi_category: r.aqiCategory,
+        pm25: r.pollutants.pm25,
+        pm10: r.pollutants.pm10,
+        no2: r.pollutants.no2,
+        so2: r.pollutants.so2,
+        co: r.pollutants.co,
+        o3: r.pollutants.o3,
+        nh3: r.pollutants.nh3,
+        source_timestamp: r.sourceTimestamp,
+        fetched_at: r.fetchedAt,
+      });
     }
-
-    for (const r of readingSlice) {
-      batch.set(db.collection('aqi_latest').doc(r.stationId), r, { merge: true });
-      updated += 1;
-
-      if (r.sourceTimestamp && r.aqi !== null) {
-        const tsKey = r.sourceTimestamp.replace(/[^0-9]/g, '').slice(0, 12);
-        const historyId = `${r.stationId}_${tsKey}`;
-        batch.set(
-          db.collection('aqi_history').doc(historyId),
-          {
-            id: historyId,
-            stationId: r.stationId,
-            aqi: r.aqi,
-            aqiCategory: r.aqiCategory,
-            pm25: r.pollutants.pm25,
-            pm10: r.pollutants.pm10,
-            sourceTimestamp: r.sourceTimestamp,
-            fetchedAt: r.fetchedAt,
-          },
-          { merge: true }
-        );
-      }
-    }
-
-    commitPromises.push(batch.commit());
   }
 
-  try {
-    await Promise.all(commitPromises);
-  } catch (err) {
-    const errCode =
-      err && typeof err === 'object' && 'code' in err
-        ? String((err as { code: unknown }).code)
-        : 'FIRESTORE_BATCH_COMMIT_FAILED';
-    throw new FirestoreIngestError(
-      'FIRESTORE_WRITE_FAILED',
-      `Firestore batch commit failed (${errCode})`
-    );
+  const latestRows = Array.from(latestMap.values());
+  const historyRows = Array.from(historyMap.values());
+
+  // Stage 1: Upsert all stations first
+  for (let i = 0; i < stationRows.length; i += CHUNK_SIZE) {
+    const chunk = stationRows.slice(i, i + CHUNK_SIZE);
+    const { error } = await supabase
+      .from('stations')
+      .upsert(chunk, { onConflict: 'station_id' });
+
+    if (error) {
+      throw new DatabaseIngestError(
+        'SUPABASE_STATIONS_WRITE_FAILED',
+        `Supabase stations upsert failed (${formatSupabaseErrorDetail(error)})`
+      );
+    }
+  }
+
+  // Stage 2: Upsert aqi_latest only after all stations upserts succeed
+  for (let i = 0; i < latestRows.length; i += CHUNK_SIZE) {
+    const chunk = latestRows.slice(i, i + CHUNK_SIZE);
+    const { error } = await supabase
+      .from('aqi_latest')
+      .upsert(chunk, { onConflict: 'station_id' });
+
+    if (error) {
+      throw new DatabaseIngestError(
+        'SUPABASE_LATEST_WRITE_FAILED',
+        `Supabase aqi_latest upsert failed (${formatSupabaseErrorDetail(error)})`
+      );
+    }
+  }
+
+  // Stage 3: Upsert aqi_history only after all aqi_latest upserts succeed
+  for (let i = 0; i < historyRows.length; i += CHUNK_SIZE) {
+    const chunk = historyRows.slice(i, i + CHUNK_SIZE);
+    const { error } = await supabase
+      .from('aqi_history')
+      .upsert(chunk, { onConflict: 'station_id,bucket_at' });
+
+    if (error) {
+      throw new DatabaseIngestError(
+        'SUPABASE_HISTORY_WRITE_FAILED',
+        `Supabase aqi_history upsert failed (${formatSupabaseErrorDetail(error)})`
+      );
+    }
   }
 
   return {
     success: true,
-    stationsProcessed: stations.length,
-    updated,
+    stationsProcessed: stationRows.length,
+    updated: latestRows.length,
     skipped: skippedCount,
     timestamp: new Date().toISOString(),
   };
