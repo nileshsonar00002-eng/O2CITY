@@ -15,7 +15,7 @@ const NAV_ITEMS = [
   { to: '/help', label: 'Help' },
 ] as const;
 
-export function Header({ dataStatus }: HeaderProps) {
+export function Header({ dataStatus: _dataStatus }: HeaderProps) {
   const location = useLocation();
   const headerRef = useRef<HTMLElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
@@ -100,44 +100,58 @@ export function Header({ dataStatus }: HeaderProps) {
     }
   }, [location.pathname, isWide]);
 
-  const statusConfig =
-    dataStatus === 'live'
-      ? {
-          dot: 'bg-emerald-500',
-          ping: 'bg-emerald-400',
-          text: 'Live Data',
-          pill: 'bg-emerald-50 text-emerald-800 border-emerald-200/80',
-        }
-      : dataStatus === 'delayed'
-        ? {
-            dot: 'bg-amber-500',
-            ping: 'bg-amber-400',
-            text: 'Delayed Data',
-            pill: 'bg-amber-50 text-amber-800 border-amber-200/80',
-          }
-        : {
-            dot: 'bg-slate-400',
-            ping: 'bg-slate-300',
-            text: 'Awaiting Data',
-            pill: 'bg-slate-100 text-slate-700 border-slate-200',
-          };
-
   return (
     <header
       ref={headerRef}
-      className="site-header is-wide sticky top-0 z-40 border-b border-slate-200/80 bg-white/90 backdrop-blur-md"
+      className="site-header is-wide sticky top-0 z-40 border-b border-slate-200/60 bg-white/85 shadow-[0_1px_12px_-4px_rgba(15,23,42,0.06)] backdrop-blur-xl"
     >
       <div
         ref={innerRef}
-        className="header-inner mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8"
+        className="header-inner mx-auto flex h-[70px] max-w-7xl items-center justify-between gap-6 px-4 sm:px-6 lg:px-8"
       >
         <Link
           to="/"
-          className="group flex items-center gap-3 rounded-lg py-1 pr-2 text-left"
+          className="group flex items-center gap-2.5 rounded-lg py-1 pr-2 text-left"
         >
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 shadow-sm ring-1 ring-slate-900/10">
-            <span className="h-4 w-4 rounded-full border-2 border-emerald-400 bg-emerald-400/20" />
-          </span>
+          <svg
+            viewBox="0 0 64 54"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            className="h-9 w-11 shrink-0"
+            aria-hidden="true"
+          >
+            {/* Outer O ring */}
+            <circle
+              cx="25"
+              cy="25"
+              r="17"
+              stroke="#0F172A"
+              strokeWidth="7.5"
+            />
+            {/* Green inner breath arc */}
+            <path
+              d="M14.5 26.5A10.5 10.5 0 0 0 32.5 32.5"
+              stroke="#16A34A"
+              strokeWidth="3.5"
+              strokeLinecap="round"
+            />
+            {/* White cutout halo for interlocking 2 */}
+            <path
+              d="M31.5 27.5C31.5 21.5 36.2 17.5 42.2 17.5C48.2 17.5 52.5 21.2 52.5 26.5C52.5 31.2 49.2 34.4 42.5 39.2L35.5 44.2H53.5"
+              stroke="#FFFFFF"
+              strokeWidth="10.5"
+              strokeLinecap="square"
+              strokeLinejoin="miter"
+            />
+            {/* Interlocking 2 */}
+            <path
+              d="M31.5 27.5C31.5 21.5 36.2 17.5 42.2 17.5C48.2 17.5 52.5 21.2 52.5 26.5C52.5 31.2 49.2 34.4 42.5 39.2L35.5 44.2H53.5"
+              stroke="#0F172A"
+              strokeWidth="6.2"
+              strokeLinecap="square"
+              strokeLinejoin="miter"
+            />
+          </svg>
           <span className="flex flex-col leading-none">
             <span className="font-display text-lg font-bold tracking-tight text-slate-900">
               O2CITY
@@ -148,11 +162,11 @@ export function Header({ dataStatus }: HeaderProps) {
           </span>
         </Link>
 
-        <nav className="site-nav flex items-center gap-4" aria-label="Primary">
+        <nav className="site-nav flex items-center gap-5" aria-label="Primary">
           <ul
             ref={menuRef}
             id="o2-site-menu"
-            className="site-menu rounded-2xl border border-slate-200 bg-white p-2 shadow-lg lg:shadow-none"
+            className="site-menu rounded-2xl border border-slate-200/80 bg-white p-2 shadow-lg lg:border-0 lg:bg-transparent lg:p-0 lg:shadow-none"
           >
             {NAV_ITEMS.map((item) => {
               const isCurrent = location.pathname === item.to;
@@ -161,10 +175,10 @@ export function Header({ dataStatus }: HeaderProps) {
                   <Link
                     to={item.to}
                     aria-current={isCurrent ? 'page' : undefined}
-                    className={`block rounded-lg px-3.5 py-2 text-sm font-medium transition-colors ${
+                    className={`relative block rounded-xl px-3.5 py-2 text-sm font-medium transition-all ${
                       isCurrent
-                        ? 'bg-emerald-50 font-semibold text-emerald-800 underline decoration-emerald-500 decoration-2 underline-offset-4'
-                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                        ? 'bg-emerald-50/90 font-semibold text-emerald-700 ring-1 ring-emerald-200/70'
+                        : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900'
                     }`}
                   >
                     {item.label}
@@ -173,20 +187,6 @@ export function Header({ dataStatus }: HeaderProps) {
               );
             })}
           </ul>
-
-          <div
-            className={`hidden items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium sm:inline-flex ${statusConfig.pill}`}
-          >
-            <span className="relative flex h-2 w-2" aria-hidden="true">
-              {dataStatus === 'live' && (
-                <span
-                  className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 motion-reduce:hidden ${statusConfig.ping}`}
-                />
-              )}
-              <span className={`relative inline-flex h-2 w-2 rounded-full ${statusConfig.dot}`} />
-            </span>
-            <span>{statusConfig.text}</span>
-          </div>
 
           <button
             type="button"

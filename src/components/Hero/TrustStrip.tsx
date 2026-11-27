@@ -25,7 +25,7 @@ const TRUST_ITEMS = [
 
 export function TrustStrip() {
   return (
-    <section aria-label="Platform highlights" className="border-y border-slate-200/80 bg-white py-8">
+    <section aria-label="Platform highlights" className="border-y border-slate-200/60 bg-white/75 py-8 backdrop-blur-sm">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 lg:gap-6">
           {TRUST_ITEMS.map((item) => {
@@ -33,9 +33,9 @@ export function TrustStrip() {
             return (
               <div
                 key={item.title}
-                className="flex items-center gap-3.5 rounded-2xl border border-slate-100 bg-slate-50/70 p-4"
+                className="flex items-center gap-3.5 rounded-2xl border border-slate-200/60 bg-white/90 p-4 shadow-2xs transition-all hover:-translate-y-0.5 hover:shadow-sm"
               >
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-50 to-sky-50 text-emerald-700 ring-1 ring-emerald-200/50">
                   <Icon className="h-5 w-5" aria-hidden="true" />
                 </div>
                 <div>

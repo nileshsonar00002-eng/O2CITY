@@ -22,7 +22,7 @@ export function HomePage({
   isLoading,
   error,
 }: HomePageProps) {
-  const { status: locationStatus, nearest, message, detectLocation, resetLocation } =
+  const { status: locationStatus, nearest, detectLocation, resetLocation } =
     useLocation();
   const [manualStation, setManualStation] = useState<StationWithAQI | null>(null);
 
@@ -45,11 +45,6 @@ export function HomePage({
     detectLocation(stations);
   };
 
-  const handleSelectCity = (city: CitySummary) => {
-    resetLocation();
-    setManualStation(city.primaryStation);
-  };
-
   const handleSelectStation = (station: StationWithAQI) => {
     resetLocation();
     setManualStation(station);
@@ -69,15 +64,12 @@ export function HomePage({
 
       <Hero
         stations={stations}
-        cities={cities}
         meta={meta}
         isLoading={isLoading}
         locationStatus={locationStatus}
-        locationMessage={message}
         selectedStation={activeStation}
         distanceKm={activeDistance}
         onUseMyLocation={handleUseMyLocation}
-        onSelectCity={handleSelectCity}
         onSelectStation={handleSelectStation}
       />
 

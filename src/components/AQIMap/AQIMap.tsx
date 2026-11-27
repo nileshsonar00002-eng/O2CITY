@@ -587,9 +587,12 @@ export function AQIMap({
   return (
     <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-lg shadow-slate-900/5">
       {/* Map Header */}
-      <div className="flex flex-col gap-2 border-b border-slate-100 bg-white px-4 py-2 lg:flex-row lg:items-center lg:justify-between">
+      <div className="relative z-10 flex flex-col gap-2 border-b border-slate-100 bg-white px-4 py-2 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex shrink-0 items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
+          <span className="relative flex h-2.5 w-2.5" aria-hidden="true">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75 motion-reduce:hidden" />
+            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+          </span>
           <span className="text-[11px] font-bold tracking-wider text-slate-900 uppercase">
             Live AQI Monitoring
           </span>
@@ -694,7 +697,7 @@ export function AQIMap({
       </div>
 
       {/* Map Viewport */}
-      <div className={`relative w-full bg-slate-100 ${heightClass}`}>
+      <div className={`relative w-full overflow-hidden bg-slate-100 ${heightClass}`}>
         {mapplsEnabled && !mapError ? (
           <>
             <div
