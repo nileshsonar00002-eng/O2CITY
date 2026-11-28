@@ -50,7 +50,7 @@ export function Hero({
           onSelectStation={onSelectStation}
           heightClass="h-[340px] sm:h-[420px]"
           showLegend={false}
-          popupPosition="top-center"
+          popupPosition="none"
         />
       </div>
 

@@ -361,3 +361,371 @@ export function MetroMiniGauge({
     </svg>
   );
 }
+
+
+function formatHourShort(iso: string): string {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return iso;
+  return new Date(ms).toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function getAqiBarColor(aqi: number | null): string {
+  if (aqi === null) return '#94a3b8';
+  if (aqi <= 50) return '#00b050';
+  if (aqi <= 100) return '#92d050';
+  if (aqi <= 200) return '#ffc000';
+  if (aqi <= 300) return '#ff7c00';
+  if (aqi <= 400) return '#e53935';
+  return '#7e0023';
+}
+
+export function NationalHourlyBarChart({
+  points,
+}: {
+  points: readonly import('../../utils/analytics').HourlyTrendPoint[];
+}) {
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  const valid = points.filter((p) => p.avgAqi !== null);
+
+  if (valid.length === 0) {
+    return (
+      <div className="flex h-48 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 text-center text-xs text-slate-500">
+        No hourly historical snapshots available yet. Bars will appear as hourly readings accumulate.
+      </div>
+    );
+  }
+
+  const maxVal = Math.max(...valid.map((p) => p.avgAqi ?? 0), 100);
+  const hoveredPoint = hoveredIdx !== null ? valid[hoveredIdx] ?? null : null;
+
+  return (
+    <div>
+      {hoveredPoint ? (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
+          <span className="font-semibold text-slate-800">
+            {formatHourShort(hoveredPoint.bucketAt)} ·{' '}
+            <span className="font-mono font-bold text-slate-950">
+              {hoveredPoint.avgAqi} AQI
+            </span>
+          </span>
+          <span className="text-[11px] text-slate-500">
+            {hoveredPoint.stationCount} reporting stations
+          </span>
+        </div>
+      ) : (
+        <div className="mb-2 flex items-center justify-between text-[11px] text-slate-500">
+          <span>Showing {valid.length} available hourly interval{valid.length === 1 ? '' : 's'}</span>
+          <span>Hover or focus a bar for exact values</span>
+        </div>
+      )}
+
+      <div className="overflow-x-auto pb-2">
+        <div
+          className="flex h-52 min-w-[360px] items-end gap-2 rounded-xl border border-slate-100 bg-slate-50/50 px-3 pt-6 pb-3"
+          role="img"
+          aria-label="National average AQI hourly bar chart"
+        >
+          {valid.map((pt, idx) => {
+            const val = pt.avgAqi ?? 0;
+            const heightPct = Math.max(8, Math.round((val / maxVal) * 100));
+            const color = getAqiBarColor(val);
+            const isHovered = hoveredIdx === idx;
+            return (
+              <div
+                key={pt.bucketAt}
+                className="flex h-full flex-1 flex-col items-center justify-end gap-1.5"
+              >
+                <span className="font-mono text-[10px] font-bold text-slate-700 tabular-nums">
+                  {val}
+                </span>
+                <button
+                  type="button"
+                  onMouseEnter={() => setHoveredIdx(idx)}
+                  onMouseLeave={() => setHoveredIdx(null)}
+                  onFocus={() => setHoveredIdx(idx)}
+                  onBlur={() => setHoveredIdx(null)}
+                  aria-label={`${formatHourShort(pt.bucketAt)}: AQI ${val} across ${pt.stationCount} stations`}
+                  className={`w-full max-w-12 rounded-t-md transition-all focus:outline-none ${
+                    isHovered ? 'ring-2 ring-slate-900/30 brightness-95' : ''
+                  }`}
+                  style={{
+                    height: `${heightPct}%`,
+                    backgroundColor: color,
+                  }}
+                />
+                <span className="font-mono text-[10px] text-slate-500">
+                  {formatHourShort(pt.bucketAt)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function PollutantTrendChart({
+  points,
+  label,
+  unit,
+  colorHex,
+}: {
+  points: readonly { bucketAt: string; value: number | null }[];
+  label: string;
+  unit: string;
+  colorHex: string;
+}) {
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  const valid = points.filter(
+    (p): p is { bucketAt: string; value: number } =>
+      p.value !== null && Number.isFinite(p.value)
+  );
+
+  if (valid.length < 2) {
+    return (
+      <div className="flex h-36 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 text-center text-xs text-slate-500">
+        {valid.length === 1
+          ? `Latest ${label}: ${valid[0]!.value} ${unit} (more hourly points needed for trend line)`
+          : `Insufficient historical ${label} readings available.`}
+      </div>
+    );
+  }
+
+  const width = 560;
+  const height = 140;
+  const padX = 24;
+  const padY = 18;
+  const values = valid.map((p) => p.value);
+  const minVal = Math.max(0, Math.min(...values) * 0.85);
+  const maxVal = Math.max(...values, minVal + 1);
+
+  const coords = valid.map((p, idx) => {
+    const x = padX + (idx / (valid.length - 1)) * (width - padX * 2);
+    const ratio = (p.value - minVal) / (maxVal - minVal);
+    const y = height - padY - ratio * (height - padY * 2);
+    return { ...p, x, y };
+  });
+
+  const linePts = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+  const active = hoveredIdx !== null ? coords[hoveredIdx] ?? null : null;
+
+  return (
+    <div>
+      {active && (
+        <p className="mb-1 text-xs font-medium text-slate-700">
+          {formatHourShort(active.bucketAt)} ·{' '}
+          <span className="font-mono font-bold text-slate-900">
+            {active.value} {unit}
+          </span>
+        </p>
+      )}
+      <div className="overflow-x-auto">
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          className="h-36 w-full min-w-[320px]"
+          role="img"
+          aria-label={`${label} historical trend chart`}
+        >
+          {[0.25, 0.5, 0.75].map((r) => (
+            <line
+              key={r}
+              x1={padX}
+              y1={padY + r * (height - padY * 2)}
+              x2={width - padX}
+              y2={padY + r * (height - padY * 2)}
+              stroke="#e2e8f0"
+              strokeWidth="0.75"
+            />
+          ))}
+          <polyline
+            fill="none"
+            stroke={colorHex}
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            points={linePts}
+          />
+          {coords.map((c, idx) => (
+            <g key={c.bucketAt}>
+              <circle
+                cx={c.x}
+                cy={c.y}
+                r={hoveredIdx === idx ? 5 : 3.5}
+                fill={colorHex}
+                stroke="#ffffff"
+                strokeWidth="1.5"
+                tabIndex={0}
+                className="cursor-pointer focus:outline-none"
+                aria-label={`${formatHourShort(c.bucketAt)}: ${c.value} ${unit}`}
+                onMouseEnter={() => setHoveredIdx(idx)}
+                onMouseLeave={() => setHoveredIdx(null)}
+                onFocus={() => setHoveredIdx(idx)}
+                onBlur={() => setHoveredIdx(null)}
+              />
+              <text
+                x={c.x}
+                y={height - 3}
+                textAnchor="middle"
+                fontSize="9"
+                fill="#64748b"
+              >
+                {formatHourShort(c.bucketAt)}
+              </text>
+            </g>
+          ))}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+export function OutlookLineChart({
+  observedPoints,
+  forecastPoints,
+}: {
+  observedPoints: readonly import('../../utils/analytics').HourlyTrendPoint[];
+  forecastPoints: readonly import('../../utils/analytics').ForecastPoint[];
+}) {
+  const validObserved = observedPoints
+    .filter((p) => p.avgAqi !== null)
+    .slice(-6)
+    .map((p) => ({
+      label: formatHourShort(p.bucketAt),
+      aqi: p.avgAqi as number,
+      isForecast: false,
+      colorHex: getAqiBarColor(p.avgAqi),
+    }));
+
+  const combined = [
+    ...validObserved,
+    ...forecastPoints.map((f) => ({
+      label: f.label,
+      aqi: f.projectedAqi,
+      isForecast: true,
+      colorHex: f.colorHex,
+    })),
+  ];
+
+  if (validObserved.length === 0 || forecastPoints.length === 0) {
+    return null;
+  }
+
+  const width = 640;
+  const height = 170;
+  const padX = 28;
+  const padY = 22;
+  const values = combined.map((c) => c.aqi);
+  const minVal = Math.max(0, Math.min(...values) - 25);
+  const maxVal = Math.max(...values, minVal + 40);
+
+  const coords = combined.map((pt, idx) => {
+    const x = padX + (idx / (combined.length - 1)) * (width - padX * 2);
+    const ratio = (pt.aqi - minVal) / (maxVal - minVal);
+    const y = height - padY - ratio * (height - padY * 2);
+    return { ...pt, x, y };
+  });
+
+  const splitIdx = validObserved.length - 1;
+  const splitX = coords[splitIdx]!.x;
+  const obsLine = coords
+    .slice(0, splitIdx + 1)
+    .map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`)
+    .join(' ');
+  const fcLine = coords
+    .slice(splitIdx)
+    .map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`)
+    .join(' ');
+
+  return (
+    <div className="overflow-x-auto">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-44 w-full min-w-[420px]"
+        role="img"
+        aria-label="Observed and estimated near-term AQI outlook chart"
+      >
+        {/* Shaded Forecast Region */}
+        <rect
+          x={splitX}
+          y={padY - 8}
+          width={width - padX - splitX + 12}
+          height={height - padY * 2 + 12}
+          rx="6"
+          fill="#ecfdf5"
+          fillOpacity="0.6"
+        />
+        <line
+          x1={splitX}
+          y1={padY - 8}
+          x2={splitX}
+          y2={height - padY + 4}
+          stroke="#94a3b8"
+          strokeDasharray="3 3"
+          strokeWidth="1"
+        />
+
+        <text x={padX} y={12} fontSize="10" fontWeight="600" fill="#475569">
+          Observed
+        </text>
+        <text x={splitX + 8} y={12} fontSize="10" fontWeight="600" fill="#047857">
+          Forecast (Estimated)
+        </text>
+
+        <polyline
+          fill="none"
+          stroke="#0f172a"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          points={obsLine}
+        />
+        <polyline
+          fill="none"
+          stroke="#059669"
+          strokeWidth="2.2"
+          strokeDasharray="5 4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          points={fcLine}
+        />
+
+        {coords.map((c) => (
+          <g key={`${c.label}-${c.isForecast ? 'fc' : 'obs'}`}>
+            <circle
+              cx={c.x}
+              cy={c.y}
+              r={3.5}
+              fill={c.isForecast ? '#059669' : '#0f172a'}
+              stroke="#ffffff"
+              strokeWidth="1.5"
+            />
+            <text
+              x={c.x}
+              y={c.y - 7}
+              textAnchor="middle"
+              fontSize="9"
+              fontWeight="700"
+              fill="#1e293b"
+            >
+              {c.aqi}
+            </text>
+            <text
+              x={c.x}
+              y={height - 3}
+              textAnchor="middle"
+              fontSize="9"
+              fill="#64748b"
+            >
+              {c.label}
+            </text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}

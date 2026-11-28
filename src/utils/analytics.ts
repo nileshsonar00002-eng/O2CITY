@@ -428,3 +428,174 @@ export function getMetroCitiesSummary(
     };
   });
 }
+
+
+export interface HourlyTrendPoint {
+  bucketAt: string;
+  stationCount: number;
+  avgAqi: number | null;
+  pollutants: {
+    pm25: number | null;
+    pm10: number | null;
+    no2: number | null;
+    so2: number | null;
+    co: number | null;
+    o3: number | null;
+  };
+}
+
+export interface ForecastPoint {
+  horizonHours: number;
+  label: string;
+  projectedAqi: number;
+  category: AQICategory;
+  colorHex: string;
+}
+
+export interface DeterministicOutlook {
+  available: boolean;
+  reason?: string;
+  direction: 'improving' | 'worsening' | 'stable' | 'unavailable';
+  points: ForecastPoint[];
+}
+
+export interface SeriesDeltaSummary {
+  current: number | null;
+  previous: number | null;
+  earliest: number | null;
+  changePct: number | null;
+}
+
+export interface StationDirectoryRow {
+  stationId: string;
+  stationName: string;
+  city: string;
+  state: string;
+  aqi: number | null;
+  category: AQICategory;
+  colorHex: string;
+  dominantPollutant: string;
+  lowConfidence: boolean;
+  pollutants: Pollutants;
+}
+
+/**
+ * Computes a deterministic damped linear-trend outlook from real observed hourly AQI points.
+ * Never fabricates data when fewer than 3 hourly observations exist.
+ */
+export function computeDeterministicForecast(
+  hourlyTrend: readonly HourlyTrendPoint[]
+): DeterministicOutlook {
+  const observed = hourlyTrend.filter(
+    (p): p is HourlyTrendPoint & { avgAqi: number } =>
+      p.avgAqi !== null && Number.isFinite(p.avgAqi)
+  );
+
+  if (observed.length < 3) {
+    return {
+      available: false,
+      reason: 'Forecast unavailable — more historical data is required.',
+      direction: 'unavailable',
+      points: [],
+    };
+  }
+
+  // Ordinary least squares slope over indexed hourly observations
+  const n = observed.length;
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
+
+  for (let i = 0; i < n; i += 1) {
+    const y = observed[i]!.avgAqi;
+    sumX += i;
+    sumY += y;
+    sumXY += i * y;
+    sumXX += i * i;
+  }
+
+  const denom = n * sumXX - sumX * sumX;
+  const rawSlope = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
+  // Cap hourly drift at +/-18 AQI/hr and damp over longer horizons
+  const slope = Math.max(-18, Math.min(18, rawSlope));
+  const lastAqi = observed[n - 1]!.avgAqi;
+
+  const horizons = [2, 4, 6, 8, 12] as const;
+  const points: ForecastPoint[] = horizons.map((h, idx) => {
+    const dampedFactor = Math.pow(0.82, idx);
+    const projected = Math.round(
+      Math.max(0, Math.min(500, lastAqi + slope * h * dampedFactor))
+    );
+    const meta = getAQIMetaByValue(projected);
+    return {
+      horizonHours: h,
+      label: `+${h}h`,
+      projectedAqi: projected,
+      category: meta.category,
+      colorHex: meta.colorHex,
+    };
+  });
+
+  const endDelta = points[points.length - 1]!.projectedAqi - lastAqi;
+  const direction: DeterministicOutlook['direction'] =
+    endDelta <= -5 ? 'improving' : endDelta >= 5 ? 'worsening' : 'stable';
+
+  return {
+    available: true,
+    direction,
+    points,
+  };
+}
+
+/**
+ * Computes current, previous, earliest, and percentage change strictly from valid numeric points.
+ */
+export function computeSeriesDelta(values: readonly (number | null)[]): SeriesDeltaSummary {
+  const valid = values.filter((v): v is number => v !== null && Number.isFinite(v));
+  if (valid.length === 0) {
+    return { current: null, previous: null, earliest: null, changePct: null };
+  }
+  const current = valid[valid.length - 1]!;
+  const previous = valid.length >= 2 ? valid[valid.length - 2]! : null;
+  const earliest = valid.length >= 2 ? valid[0]! : null;
+  const changePct =
+    earliest !== null && earliest > 0
+      ? Math.round(((current - earliest) / earliest) * 100)
+      : null;
+
+  return { current, previous, earliest, changePct };
+}
+
+/**
+ * Builds station-level directory rows with CPCB confidence and dominant pollutant metadata.
+ */
+export function buildStationDirectoryRows(
+  stations: readonly StationWithAQI[]
+): StationDirectoryRow[] {
+  const cityValidCounts = new Map<string, number>();
+  for (const s of stations) {
+    if (!isStationCpcbValid(s)) continue;
+    const key = `${s.city.toLowerCase()}__${s.state.toLowerCase()}`;
+    cityValidCounts.set(key, (cityValidCounts.get(key) ?? 0) + 1);
+  }
+
+  return stations.map((s) => {
+    const meta = getAQIMetaByValue(s.aqi);
+    const domKey = getDominantPollutantKey(s.pollutants);
+    const cityKey = `${s.city.toLowerCase()}__${s.state.toLowerCase()}`;
+    const validInCity = cityValidCounts.get(cityKey) ?? 0;
+    return {
+      stationId: s.stationId,
+      stationName: s.stationName,
+      city: s.city,
+      state: s.state,
+      aqi: s.aqi,
+      category: meta.category,
+      colorHex: meta.colorHex,
+      dominantPollutant: domKey ? POLLUTANT_META[domKey].label : '—',
+      lowConfidence: !isStationCpcbValid(s) || validInCity < 2,
+      pollutants: s.pollutants,
+    };
+  });
+}

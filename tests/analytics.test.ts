@@ -4,10 +4,13 @@ import type { StationWithAQI } from '../src/types/station.ts';
 import {
   buildRankedCities,
   computeAqiDistribution,
+  computeDeterministicForecast,
   computeDominantPollutantBreakdown,
+  computeSeriesDelta,
   computeStateAverages,
   getMaxUpdateTimestamp,
   getTopAndBottomStates,
+  type HourlyTrendPoint,
   isStationCpcbValid,
 } from '../src/utils/analytics.ts';
 
@@ -136,5 +139,41 @@ describe('computeDominantPollutantBreakdown & getMaxUpdateTimestamp', () => {
 
     const maxTs = getMaxUpdateTimestamp(stations, '2026-11-26T07:00:00Z');
     assert.equal(maxTs, '2026-11-26T12:30:00Z');
+  });
+});
+
+
+describe('computeDeterministicForecast & computeSeriesDelta', () => {
+  const emptyPollutants = { pm25: null, pm10: null, no2: null, so2: null, co: null, o3: null };
+
+  it('returns unavailable when fewer than 3 hourly points exist', () => {
+    const res = computeDeterministicForecast([
+      { bucketAt: '2026-11-28T03:00:00Z', stationCount: 500, avgAqi: 210, pollutants: emptyPollutants },
+      { bucketAt: '2026-11-28T04:00:00Z', stationCount: 500, avgAqi: 220, pollutants: emptyPollutants },
+    ]);
+    assert.equal(res.available, false);
+    assert.equal(res.direction, 'unavailable');
+    assert.equal(res.points.length, 0);
+  });
+
+  it('projects 2h..12h outlook and detects worsening trend from 3+ real observations', () => {
+    const points: HourlyTrendPoint[] = [
+      { bucketAt: '2026-11-28T02:00:00Z', stationCount: 500, avgAqi: 180, pollutants: emptyPollutants },
+      { bucketAt: '2026-11-28T03:00:00Z', stationCount: 500, avgAqi: 195, pollutants: emptyPollutants },
+      { bucketAt: '2026-11-28T04:00:00Z', stationCount: 500, avgAqi: 210, pollutants: emptyPollutants },
+    ];
+    const res = computeDeterministicForecast(points);
+    assert.equal(res.available, true);
+    assert.equal(res.direction, 'worsening');
+    assert.deepEqual(
+      res.points.map((p) => p.label),
+      ['+2h', '+4h', '+6h', '+8h', '+12h']
+    );
+
+    const delta = computeSeriesDelta([180, 195, 210]);
+    assert.equal(delta.current, 210);
+    assert.equal(delta.previous, 195);
+    assert.equal(delta.earliest, 180);
+    assert.equal(delta.changePct, 17);
   });
 });

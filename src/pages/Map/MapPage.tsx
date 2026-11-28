@@ -1,11 +1,10 @@
 import { RefreshCw, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { AQIMap } from '../../components/AQIMap/AQIMap';
-import { AQIStatusCard } from '../../components/AQIStatus/AQIStatusCard';
+import { MapStationSideCard } from '../../components/AQIStatus/MapStationSideCard';
 import { fetchStationHistory } from '../../services/aqiService';
 import type { AQIHistoryPoint, AQIResponseMeta } from '../../types/aqi';
 import type { CitySummary, StationWithAQI } from '../../types/station';
-import { formatRelativeTime, getAQIMetaByValue } from '../../utils/aqi';
 
 interface MapPageProps {
   stations: readonly StationWithAQI[];
@@ -46,7 +45,7 @@ export function MapPage({
     void (async () => {
       setLoadingHistory(true);
       try {
-        const points = await fetchStationHistory(selectedStation.stationId, 12);
+        const points = await fetchStationHistory(selectedStation.stationId, 24);
         if (!cancelled) setHistory(points);
       } finally {
         if (!cancelled) setLoadingHistory(false);
@@ -127,60 +126,26 @@ export function MapPage({
         </div>
       </div>
 
-      <div className="mt-6">
+      <div className="relative mt-6">
         <AQIMap
           stations={stations}
           meta={meta}
           isLoading={isLoading}
           selectedStation={selectedStation}
           onSelectStation={setSelectedStation}
-          heightClass="h-[460px] sm:h-[560px]"
+          heightClass="h-[500px] sm:h-[600px]"
+          popupPosition="none"
         />
-      </div>
 
-      {selectedStation && (
-        <div className="mt-6 space-y-4">
-          <AQIStatusCard
+        {selectedStation && (
+          <MapStationSideCard
             station={selectedStation}
-            subtitle="Station Details"
+            history={history}
+            loadingHistory={loadingHistory}
+            onClose={() => setSelectedStation(null)}
           />
-
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
-            <h2 className="font-display text-base font-bold text-slate-900">
-              Recent Station Readings
-            </h2>
-            {loadingHistory ? (
-              <p className="mt-2 text-xs text-slate-500">Loading recent history...</p>
-            ) : history.length === 0 ? (
-              <p className="mt-2 text-xs text-slate-500">
-                Historical snapshots will appear here as readings accumulate.
-              </p>
-            ) : (
-              <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4 md:grid-cols-6">
-                {history.map((point) => {
-                  const pointMeta = getAQIMetaByValue(point.aqi);
-                  return (
-                    <div
-                      key={point.id}
-                      className="rounded-xl border border-slate-100 bg-slate-50 p-3"
-                    >
-                      <span className="block font-mono text-lg font-bold text-slate-900">
-                        {point.aqi ?? '—'}
-                      </span>
-                      <span className={`text-[11px] font-semibold ${pointMeta.textClass}`}>
-                        {point.aqiCategory}
-                      </span>
-                      <span className="mt-1 block text-[10px] text-slate-500">
-                        {formatRelativeTime(point.sourceTimestamp)}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

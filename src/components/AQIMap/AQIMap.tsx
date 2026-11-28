@@ -25,7 +25,7 @@ interface AQIMapProps {
   onSelectStation?: (station: StationWithAQI) => void;
   heightClass?: string;
   showLegend?: boolean;
-  popupPosition?: 'marker' | 'top-center';
+  popupPosition?: 'marker' | 'top-center' | 'none';
 }
 
 const PUNE_FALLBACK = { lat: 18.5204, lng: 73.8567 } as const;
